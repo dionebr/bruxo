@@ -88,17 +88,26 @@ type Config struct {
 	GroqAPIKey        string
 }
 
+type Vulnerability struct {
+	Name           string `json:"Name"`
+	// Severity can be Critical, High, Medium, Low, Informational
+	Severity       string `json:"Severity"`
+	Description    string `json:"Description"`
+	Recommendation string `json:"Recommendation"`
+}
+
 type ScanResult struct {
-	URL           string        `json:"URL"`
-	StatusCode    int           `json:"StatusCode"`
-	ContentLength int           `json:"ContentLength"`
-	ResponseTime  time.Duration `json:"ResponseTime"`
-	ContentType   string        `json:"ContentType"`
-	Title         string        `json:"Title"`
-	Category      string        `json:"Category"`
-	IsHidden      bool          `json:"IsHidden"`
-	Error         string        `json:"Error"`
-	AIAnalysis    string        `json:"AIAnalysis,omitempty"`
+	URL             string          `json:"URL"`
+	StatusCode      int             `json:"StatusCode"`
+	ContentLength   int             `json:"ContentLength"`
+	ResponseTime    time.Duration   `json:"ResponseTime"`
+	ContentType     string          `json:"ContentType"`
+	Title           string          `json:"Title"`
+	Category        string          `json:"Category"`
+	IsHidden        bool            `json:"IsHidden"`
+	Error           string          `json:"Error"`
+	AIAnalysis      string          `json:"AIAnalysis,omitempty"`
+	Vulnerabilities []Vulnerability `json:"Vulnerabilities,omitempty"`
 }
 
 // Estruturas para a API da OpenAI
@@ -395,6 +404,8 @@ func (b *BruxoEngine) collectResults() {
 			if b.shouldShowResult(result.StatusCode) || result.IsHidden {
 				atomic.AddInt64(&b.progress.found, 1)
 				b.mu.Lock()
+				b.analyzeVulnerabilities(&result)
+
 				b.results = append(b.results, result)
 				b.mu.Unlock()
 
@@ -577,6 +588,51 @@ func (b *BruxoEngine) categorizePath(path string) string {
 	default:
 		return "General"
 	}
+}
+
+func (b *BruxoEngine) analyzeVulnerabilities(result *ScanResult) {
+	// Mini-scanner para repositório .git exposto
+	if strings.HasSuffix(result.URL, "/.git/config") && result.StatusCode == 200 {
+		vuln := Vulnerability{
+			Name:           "Exposed Git Repository",
+			Severity:       "Critical",
+			Description:    "The .git/config file is publicly accessible. This can expose the entire source code, history, and potentially sensitive information.",
+			Recommendation: "Immediately restrict access to the .git directory. Use tools like 'git-dumper' to download the source code and analyze it for secrets.",
+		}
+		result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+	}
+
+	// Detector de Painel de Login
+	loginPaths := []string{"/login", "/admin", "/user", "/wp-login.php", "/administrator/"}
+	for _, p := range loginPaths {
+		if strings.Contains(result.URL, p) && result.StatusCode == 200 {
+			vuln := Vulnerability{
+				Name:           "Potential Login Panel",
+				Severity:       "Medium",
+				Description:    "A potential login panel was found. This could be a target for brute-force attacks or default credential testing.",
+				Recommendation: "Attempt to identify the technology and test for default credentials. Consider running a brute-force attack with a common password list.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+			break // Adiciona apenas uma vez por resultado
+		}
+	}
+
+	// Detector de Arquivos Sensíveis
+	sensitiveFiles := []string{".env", "wp-config.php", "config.json", "credentials", ".htpasswd"}
+	for _, f := range sensitiveFiles {
+		if strings.HasSuffix(result.URL, f) && result.StatusCode == 200 {
+			vuln := Vulnerability{
+				Name:           "Sensitive File Exposed",
+				Severity:       "High",
+				Description:    fmt.Sprintf("The file '%s' was found, which may contain sensitive information like database credentials, API keys, or other secrets.", f),
+				Recommendation: "Immediately review the contents of the file and restrict access. Rotate any exposed credentials.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+			break
+		}
+	}
+
+	// Futuros mini-scanners podem ser adicionados aqui
 }
 
 func getStatusCodeColor(statusCode int) string {

@@ -1,162 +1,143 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Relatório de Scan - Bruxo</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <title>Bruxo Tactical Report - {{ .TargetURL }}</title>
     <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #1a1a2e;
-            color: #e0e0e0;
-            margin: 0;
-            padding: 20px;
+        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;700&family=Roboto:wght@400;500;700&display=swap');
+        body { font-family: 'Roboto', sans-serif; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
+        .container { max-width: 1600px; margin: auto; }
+        header { text-align: center; margin-bottom: 20px; }
+        header h1 { font-family: 'Fira Code', monospace; color: #9c27b0; }
+        .dashboard {
+            display: grid;
+            grid-template-columns: 3fr 2fr 4fr;
+            grid-template-rows: auto 1fr;
+            gap: 20px;
+            height: 80vh;
         }
-        .container { max-width: 1200px; margin: auto; }
-        header { text-align: center; margin-bottom: 40px; border-bottom: 2px solid #4f4f8e; padding-bottom: 20px; }
-        header h1 { color: #c5c5ff; }
-        header p { color: #a0a0c0; }
+        .panel {
+            background-color: #1e1e1e;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            overflow-y: auto;
+        }
+        .panel-header { grid-column: 1 / -1; text-align: center; background-color: #1e1e1e; padding: 10px; border-radius: 8px;}
+        #heatmap-panel h3, #attack-path-panel h3, #details-panel h3 { margin-top: 0; color: #9c27b0; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        
+        /* Heatmap Styles */
+        .heatmap-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
+        .heat-card {
+            background-color: #2a2a2a; border-radius: 5px; padding: 10px; text-align: center;
+            cursor: pointer; transition: transform 0.2s; border-bottom: 4px solid;
+            word-break: break-word; font-size: 0.9em;
+        }
+        .heat-card:hover { transform: scale(1.05); }
+        .severity-Critical { border-color: #f44336; } /* Red */
+        .severity-High { border-color: #FF9800; } /* Orange */
+        .severity-Medium { border-color: #FFC107; } /* Amber */
+        .severity-Low { border-color: #2196F3; } /* Blue */
+        .severity-Informational { border-color: #4CAF50; } /* Green */
+        .severity-None { border-color: #444; }
 
-        .grid-container { display: grid; grid-template-columns: 1fr 2fr; gap: 30px; align-items: flex-start; }
-        .summary-card, .results-card, .owasp-card { background-color: #2a2a4e; border-radius: 10px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
-        .summary-card h2, .results-card h2, .owasp-card h2 { color: #c5c5ff; margin-top: 0; border-bottom: 1px solid #4f4f8e; padding-bottom: 10px; }
-
-        .results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 15px; }
-        .result-item { background-color: #3a3a6e; border-radius: 8px; padding: 15px; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; border-left: 4px solid transparent; }
-        .result-item:hover, .result-item.active { transform: translateY(-5px); box-shadow: 0 6px 20px rgba(0,0,0,0.4); border-left-width: 8px; }
-        .result-item .title { font-weight: bold; word-wrap: break-word; }
-
-        .badge { padding: 3px 8px; border-radius: 12px; font-size: 0.8em; font-weight: bold; margin-right: 5px; }
-        .status-2xx { background-color: #28a745; color: white; } .status-3xx { background-color: #007bff; color: white; } .status-4xx { background-color: #ffc107; color: #333; } .status-5xx { background-color: #dc3545; color: white; }
-        .hidden-badge { background-color: #6f42c1; color: white; }
-
-        #bruxo-ai-section { display: none; margin-top: 30px; background-color: #2a2a4e; border-radius: 10px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
-        #bruxo-ai-section h2 { color: #c5c5ff; margin-top: 0; border-bottom: 1px solid #4f4f8e; padding-bottom: 10px; }
-        .ai-content-wrapper { display: flex; align-items: center; gap: 20px; }
-        .ai-robot { font-size: 4em; color: #7aa2f7; animation: float 3s ease-in-out infinite; }
-        @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
-        .ai-analysis-content { background-color: #1a1a2e; padding: 15px; border-radius: 8px; flex-grow: 1; min-height: 100px; }
-        .ai-analysis-content code { background-color: #4f4f8e; padding: 2px 5px; border-radius: 4px; }
-        .ai-analysis-content pre { background-color: #101020; padding: 10px; border-radius: 5px; overflow-x: auto; }
-        .loading-text { font-style: italic; color: #a0a0c0; }
-
-        .owasp-card ul { list-style: none; padding: 0; } .owasp-card li { margin-bottom: 10px; } .owasp-card a { color: #7aa2f7; text-decoration: none; } .owasp-card a:hover { text-decoration: underline; }
-
-        footer { text-align: center; margin-top: 40px; padding-top: 20px; border-top: 2px solid #4f4f8e; color: #a0a0c0; }
-        .coffee-button { display: inline-block; background-color: #ff9e64; color: #1a1a2e; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: bold; margin-top: 10px; transition: background-color 0.2s; }
-        .coffee-button:hover { background-color: #ffb380; }
+        /* Attack Path Styles */
+        .attack-step { padding: 10px; margin-bottom: 10px; border-radius: 5px; background-color: #2a2a2a; cursor: pointer; border-left: 4px solid;}
+        
+        /* Details Panel Styles */
+        #details-panel .detail-block { margin-bottom: 15px; }
+        #details-panel h4 { color: #9c27b0; margin-bottom: 5px; }
+        #details-panel p { margin: 5px 0; background-color: #2a2a2a; padding: 8px; border-radius: 4px; }
+        #details-panel pre { background-color: #111; padding: 10px; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; }
 
     </style>
 </head>
 <body>
     <div class="container">
-        <header>
-            <h1>Relatório de Análise de Segurança - Bruxo</h1>
-            <p>Alvo: <strong>{{.TargetURL}}</strong> | Gerado em: {{.GeneratedAt}}</p>
-        </header>
-
-        <div class="grid-container">
-            <div class="summary-card">
-                <h2>Resumo Visual</h2>
-                <canvas id="statusChart"></canvas>
+        <div class="dashboard">
+            <div class="panel-header">
+                 <h1>🧙 Bruxo Tactical Dashboard</h1>
+                 <p>Target: <strong>{{ .TargetURL }}</strong></p>
             </div>
 
-            <div class="results-card">
-                <h2>Resultados Encontrados ({{.TotalFound}})</h2>
-                <div class="results-grid" id="results-grid">
-                    {{range .Results}}
-                    <div class="result-item" onclick="showAIAnalysis(this)" data-status-class="status-{{.StatusCode}}" data-ai-analysis="{{.AIAnalysis | html}}">
-                        <span class="badge status-{{.StatusCode}}">{{.StatusCode}}</span>
-                        {{if .IsHidden}}<span class="badge hidden-badge">Oculto</span>{{end}}
-                        <div class="title">{{.URL}}</div>
-                    </div>
-                    {{end}}
-                </div>
+            <div id="heatmap-panel" class="panel">
+                <h3>Vulnerability Heatmap</h3>
+                <div id="heatmap-grid" class="heatmap-grid"></div>
+            </div>
+
+            <div id="attack-path-panel" class="panel">
+                <h3>Critical Attack Path</h3>
+                <div id="attack-path-list"></div>
+            </div>
+
+            <div id="details-panel" class="panel">
+                <h3>Details</h3>
+                <div id="details-content">Select an item from the Heatmap or Attack Path to see details.</div>
             </div>
         </div>
-
-        <div id="bruxo-ai-section">
-            <h2><i class="fas fa-hat-wizard"></i> Análise do Bruxo</h2>
-            <div class="ai-content-wrapper">
-                <div class="ai-robot"><i class="fas fa-hat-wizard"></i></div>
-                <div class="ai-analysis-content" id="ai-analysis-content"></div>
-            </div>
-        </div>
-
-        <div class="owasp-card" style="margin-top: 30px;">
-            <h2>Referência OWASP Top 10</h2>
-            <p>Conecte os achados com as categorias de risco mais comuns. A análise da IA pode ajudar a identificar classificações relevantes.</p>
-            <ul>
-                <li><a href="https://owasp.org/Top10/A01_2021-Broken_Access_Control/" target="_blank">A01:2021 - Quebra de Controle de Acesso</a></li>
-                <li><a href="https://owasp.org/Top10/A02_2021-Cryptographic_Failures/" target="_blank">A02:2021 - Falhas Criptográficas</a></li>
-                <li><a href="https://owasp.org/Top10/A03_2021-Injection/" target="_blank">A03:2021 - Injeção</a></li>
-                <!-- Adicionar outros links do OWASP Top 10 -->
-            </ul>
-        </div>
-
-        <footer>
-            <p>Relatório gerado por <strong>Bruxo Scanner</strong> | Criador: Dione</p>
-            <a href="#" class="coffee-button"><i class="fas fa-coffee"></i> Doe um Café</a>
-        </footer>
-
     </div>
 
-    <div id="results-data" data-results='{{.Results | json}}' style="display: none;"></div>
-
     <script>
-        const aiSection = document.getElementById('bruxo-ai-section');
-        const aiContentDiv = document.getElementById('ai-analysis-content');
-        let activeCard = null;
+        const results = {{ .Results | json }};
 
-        function showAIAnalysis(cardElement) {
-            if (activeCard) {
-                activeCard.classList.remove('active');
-            }
-            cardElement.classList.add('active');
-            activeCard = cardElement;
+        const severityOrder = { 'Critical': 1, 'High': 2, 'Medium': 3, 'Low': 4, 'Informational': 5, 'None': 6 };
 
-            const analysis = cardElement.getAttribute('data-ai-analysis');
-            aiSection.style.display = 'block';
-            aiContentDiv.innerHTML = `<p class="loading-text"><i class="fas fa-spinner fa-spin"></i> Bruxo AI está extraindo informações...</p>`;
-
-            setTimeout(() => {
-                aiContentDiv.innerHTML = marked.parse(analysis);
-            }, 1500); // Simula o tempo de análise
+        function getHighestSeverity(vulnerabilities) {
+            if (!vulnerabilities || vulnerabilities.length === 0) return 'None';
+            return vulnerabilities.reduce((max, v) => severityOrder[v.Severity] < severityOrder[max] ? v.Severity : max, 'None');
         }
 
-        // Lógica do Gráfico (sem alterações)
-        const resultsDataElement = document.getElementById('results-data');
-        const results = JSON.parse(resultsDataElement.getAttribute('data-results'));
-        const statusCounts = results.reduce((acc, result) => {
-            const series = Math.floor(result.StatusCode / 100) + 'xx';
-            acc[series] = (acc[series] || 0) + 1;
-            return acc;
-        }, {});
-        const ctx = document.getElementById('statusChart').getContext('2d');
-        new Chart(ctx, {
-            type: 'doughnut',
-            data: {
-                labels: Object.keys(statusCounts),
-                datasets: [{
-                    label: 'Status Codes',
-                    data: Object.values(statusCounts),
-                    backgroundColor: ['#28a745', '#007bff', '#ffc107', '#dc3545'],
-                    borderColor: '#2a2a4e', borderWidth: 3
-                }]
-            },
-            options: { responsive: true, plugins: { legend: { position: 'top', labels: { color: '#e0e0e0' } } } }
+        const heatmapGrid = document.getElementById('heatmap-grid');
+        const attackPathList = document.getElementById('attack-path-list');
+        const detailsContent = document.getElementById('details-content');
+
+        // 1. Process and sort data
+        const processedResults = results.map(r => ({...r, highestSeverity: getHighestSeverity(r.Vulnerabilities)}));
+        processedResults.sort((a, b) => severityOrder[a.highestSeverity] - severityOrder[b.highestSeverity]);
+
+        // 2. Populate Panels
+        processedResults.forEach(result => {
+            // Populate Heatmap
+            const heatCard = document.createElement('div');
+            heatCard.className = `heat-card severity-${result.highestSeverity}`;
+            heatCard.textContent = result.URL.split('/').pop() || result.URL; // Show last part of URL
+            heatCard.onclick = () => showDetails(result);
+            heatmapGrid.appendChild(heatCard);
+
+            // Populate Attack Path (only if vulnerabilities exist)
+            if (result.Vulnerabilities && result.Vulnerabilities.length > 0) {
+                const attackStep = document.createElement('div');
+                attackStep.className = `attack-step severity-${result.highestSeverity}`;
+                attackStep.innerHTML = `<strong>${result.highestSeverity}:</strong> ${result.Vulnerabilities[0].Name}`;
+                attackStep.onclick = () => showDetails(result);
+                attackPathList.appendChild(attackStep);
+            }
         });
 
-        // Adiciona cor na borda do card (sem alterações)
-        document.querySelectorAll('.result-item').forEach(item => {
-            const status = item.getAttribute('data-status-class');
-            const colorMap = { 'status-2xx': '#28a745', 'status-3xx': '#007bff', 'status-4xx': '#ffc107', 'status-5xx': '#dc3545' };
-            const series = status.replace(/\d/g, 'x');
-            if (colorMap[series]) { item.style.borderLeftColor = colorMap[series]; }
-        });
+        // 3. Details Function
+        function showDetails(result) {
+            let vulnerabilitiesHTML = '<h4>No vulnerabilities detected.</h4>';
+            if (result.Vulnerabilities && result.Vulnerabilities.length > 0) {
+                vulnerabilitiesHTML = result.Vulnerabilities.map(v => `
+                    <div class="detail-block">
+                        <h4>${v.Name} (${v.Severity})</h4>
+                        <p><strong>Description:</strong> ${v.Description}</p>
+                        <p><strong>Recommendation:</strong> ${v.Recommendation}</p>
+                    </div>
+                `).join('');
+            }
+
+            detailsContent.innerHTML = `
+                <h3>${result.URL}</h3>
+                <div class="detail-block">
+                    <p><strong>Status Code:</strong> ${result.StatusCode}</p>
+                    <p><strong>Content-Length:</strong> ${result.ContentLength} bytes</p>
+                </div>
+                ${vulnerabilitiesHTML}
+            `;
+        }
+
     </script>
 </body>
 </html>
