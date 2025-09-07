@@ -52,6 +52,11 @@
         #details-panel pre { background-color: #111; padding: 10px; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; font-family: 'Fira Code', monospace; margin-top: 5px; }
         #details-panel h5 { color: #FF9800; margin-top: 15px; margin-bottom: 5px; }
         .attack-flow-steps { margin-top: 10px; border-left: 2px solid #9c27b0; padding-left: 10px; }
+        .mitre-block { background-color: #2a2a2a; padding: 10px; border-radius: 4px; margin-top: 15px; border-left: 4px solid #f44336;}
+        .mitre-block a { color: #9c27b0; text-decoration: none; }
+        .attack-flow-step { display: flex; align-items: center; margin-bottom: 5px; }
+        .attack-flow-step input[type='checkbox'] { margin-right: 10px; }
+
 
 
         /* Post-Exploitation Panel Styles */
@@ -194,15 +199,28 @@ sekurlsa::logonpasswords</code></pre>
             let vulnerabilitiesHTML = '<h4>No vulnerabilities detected.</h4>';
             if (result.Vulnerabilities && result.Vulnerabilities.length > 0) {
                 vulnerabilitiesHTML = result.Vulnerabilities.map(v => {
+                    let mitreHTML = '';
+                    if (v.MITRETechniqueID) {
+                        mitreHTML = `
+                            <div class="mitre-block">
+                                <strong>MITRE ATT&CK Technique:</strong>
+                                <p><a href="${v.MITRETechniqueURL}" target="_blank">${v.MITRETechniqueID}: ${v.MITRETechniqueName}</a></p>
+                            </div>
+                        `;
+                    }
+
                     let attackFlowHTML = '';
                     if (v.AttackFlow && v.AttackFlow.length > 0) {
                         attackFlowHTML = `
                             <h5>Guided Attack Flow</h5>
                             <div class="attack-flow-steps">
-                                ${v.AttackFlow.map(step => `
+                                ${v.AttackFlow.map((step, index) => `
                                     <div class="attack-flow-step">
-                                        <strong>${escapeHtml(step.Stage)}:</strong>
-                                        <pre><code>${escapeHtml(step.Command)}</code></pre>
+                                        <input type="checkbox" id="step-${result.URL}-${v.Name}-${index}" onchange="saveProgress(this)">
+                                        <label for="step-${result.URL}-${v.Name}-${index}">
+                                            <strong>${escapeHtml(step.Stage)}:</strong>
+                                            <pre><code>${escapeHtml(step.Command)}</code></pre>
+                                        </label>
                                     </div>
                                 `).join('')}
                             </div>
@@ -215,6 +233,7 @@ sekurlsa::logonpasswords</code></pre>
                             <p><strong>Description:</strong> ${escapeHtml(v.Description)}</p>
                             <p><strong>Recommendation:</strong> ${escapeHtml(v.Recommendation)}</p>
                             ${attackFlowHTML}
+                            ${mitreHTML}
                         </div>
                     `;
                 }).join('');
@@ -228,6 +247,20 @@ sekurlsa::logonpasswords</code></pre>
                 </div>
                 ${vulnerabilitiesHTML}
             `;
+            loadProgress();
+        }
+
+        function saveProgress(checkbox) {
+            localStorage.setItem(checkbox.id, checkbox.checked);
+        }
+
+        function loadProgress() {
+            document.querySelectorAll('.attack-flow-step input[type="checkbox"]').forEach(checkbox => {
+                const savedState = localStorage.getItem(checkbox.id);
+                if (savedState !== null) {
+                    checkbox.checked = (savedState === 'true');
+                }
+            });
         }
 
         // 4. Post-Exploitation Panel Logic
