@@ -89,6 +89,7 @@ type Config struct {
 	RedTeamToolURL    string
 	ReportFormat      string
 	ReportType        string
+	AssetValue        string
 }
 
 type AttackStep struct {
@@ -159,7 +160,9 @@ type Vulnerability struct {
 	Severity           string     `json:"Severity"`
 	Description        string     `json:"Description"`
 	Recommendation     string     `json:"Recommendation"`
-	AttackFlow         AttackFlow `json:"AttackFlow,omitempty"`
+	AttackFlow         AttackFlow `json:"AttackFlow"`
+	BusinessImpactScore int        `json:"BusinessImpactScore"`
+	EstimatedRepairTime string     `json:"EstimatedRepairTime,omitempty"`
 	MITRETechniqueID   string     `json:"MITRETechniqueID,omitempty"`
 	MITRETechniqueName string     `json:"MITRETechniqueName,omitempty"`
 	MITRETechniqueURL  string     `json:"MITRETechniqueURL,omitempty"`
@@ -399,6 +402,8 @@ func (b *BruxoEngine) Scan() error {
 		b.logger.Info("AI analysis complete.")
 	}
 
+	b.calculateImpactScores()
+
 	if b.config.EnableAttackFlow {
 		for i := range b.results {
 			result := &b.results[i]
@@ -606,6 +611,48 @@ func (b *BruxoEngine) printSummaryTable() {
 		ColorWhite, time.Since(b.progress.startTime).Seconds(), len(b.results), ColorReset)
 }
 
+var severityScores = map[string]int{
+	"Critical": 25,
+	"High":     15,
+	"Medium":   5,
+	"Low":      1,
+}
+
+var assetValueMultipliers = map[string]int{
+	"critical": 4,
+	"high":     2,
+	"medium":   1,
+	"low":      1,
+}
+
+var repairTimeEstimates = map[string]string{
+	"Exposed Git Repository":   "2-4 hours",
+	"Sensitive File Exposed":   "1-3 hours",
+	"Missing Security Headers": "4-8 hours",
+	"Directory Listing":        "1-2 hours",
+}
+
+func (b *BruxoEngine) calculateImpactScores() {
+	multiplier, ok := assetValueMultipliers[b.config.AssetValue]
+	if !ok {
+		multiplier = 1 // Padrão para médio se o valor for inválido
+	}
+
+	for i := range b.results {
+		for j := range b.results[i].Vulnerabilities {
+			vuln := &b.results[i].Vulnerabilities[j]
+			baseScore := severityScores[vuln.Severity]
+			vuln.BusinessImpactScore = baseScore * multiplier
+
+			if time, exists := repairTimeEstimates[vuln.Name]; exists {
+				vuln.EstimatedRepairTime = time
+			} else {
+				vuln.EstimatedRepairTime = "N/A"
+			}
+		}
+	}
+}
+
 func (b *BruxoEngine) generateReport() error {
 	switch b.config.ReportFormat {
 	case "html":
@@ -628,7 +675,11 @@ func (b *BruxoEngine) renderHTMLReport(outputPath, templateName string) error {
 	}
 	defer file.Close()
 
-	tmpl, err := template.ParseFiles(templateName)
+	funcMap := template.FuncMap{
+		"ToLower": strings.ToLower,
+	}
+
+	tmpl, err := template.New(templateName).Funcs(funcMap).ParseFiles(templateName)
 	if err != nil {
 		return err
 	}
@@ -703,9 +754,21 @@ func (b *BruxoEngine) prepareTemplateData() map[string]interface{} {
 		}
 	}
 
+	// Criar uma lista única de vulnerabilidades para ordenação
+	allVulns := []Vulnerability{}
+	for _, result := range b.results {
+		allVulns = append(allVulns, result.Vulnerabilities...)
+	}
+
+	// Ordenar vulnerabilidades pelo BusinessImpactScore (do maior para o menor)
+	sort.Slice(allVulns, func(i, j int) bool {
+		return allVulns[i].BusinessImpactScore > allVulns[j].BusinessImpactScore
+	})
+
 	return map[string]interface{}{
-		"Results":         b.results,
-		"TargetURL":       b.config.TargetURL,
+		"Results":          b.results,
+		"PrioritizedVulns": allVulns,
+		"TargetURL":        b.config.TargetURL,
 		"GeneratedAt":     time.Now().Format(time.RFC1123),
 		"TotalFound":      len(b.results),
 		"ChatAnalysis":    b.chatAnalysis,
@@ -1176,6 +1239,7 @@ func main() {
 	flag.StringVar(&config.RedTeamToolURL, "red-team-tool-url", "", "URL of the Red Team tool API for integration")
 	flag.StringVar(&config.ReportFormat, "report-format", "html", "Output report format (html, pdf)")
 	flag.StringVar(&config.ReportType, "report-type", "technical", "Report type (technical, executive)")
+	flag.StringVar(&config.AssetValue, "asset-value", "medium", "Asset value for impact calculation (low, medium, high, critical)")
 
 	flag.Parse()
 
