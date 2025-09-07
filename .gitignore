@@ -1,0 +1,10 @@
+# Compiled binary
+bruxo
+
+# Generated reports
+report.html
+report.json
+report.txt
+
+# State files from other tools
+*.state
