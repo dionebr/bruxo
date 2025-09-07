@@ -168,6 +168,11 @@
         </div>
 
         <!-- Modal do Terminal C2 -->
+        <div id="internal-network-map" class="panel" style="grid-column: 1 / -1; margin-top: 20px;">
+            <h3 style="color: #4CAF50;">Internal Network Map</h3>
+            <div id="internal-map-content"></div>
+        </div>
+
         <div id="c2-terminal-modal" style="display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.7);">
             <div style="background-color: #1e1e1e; margin: 10% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 800px; border-radius: 8px; font-family: 'Fira Code', monospace;">
                 <h4 id="terminal-title" style="color: #9c27b0;">Terminal for Agent: </h4>
@@ -252,81 +257,51 @@ sekurlsa::logonpasswords</code></pre>
                 .replace(/'/g, "&#039;");
         }
 
-        function showDetails(result) {
-            let vulnerabilitiesHTML = '<h4>No vulnerabilities detected.</h4>';
-            if (result.Vulnerabilities && result.Vulnerabilities.length > 0) {
-                vulnerabilitiesHTML = result.Vulnerabilities.map(v => {
-                    let mitreHTML = '';
-                    if (v.MITRETechniqueID) {
-                        mitreHTML = `
-                            <div class="mitre-block">
-                                <strong>MITRE ATT&CK Technique:</strong>
-                                <p><a href="${v.MITRETechniqueURL}" target="_blank">${v.MITRETechniqueID}: ${v.MITRETechniqueName}</a></p>
-                            </div>
-                        `;
-                    }
-
-                    let attackFlowHTML = '';
-                    if (v.AttackFlow && v.AttackFlow.length > 0) {
-                        attackFlowHTML = `
-                            <h5>Guided Attack Flow</h5>
-                            <div class="attack-flow-steps">
-                                ${v.AttackFlow.map((step, index) => `
-                                    <div class="attack-flow-step">
-                                        <input type="checkbox" id="step-${result.URL}-${v.Name}-${index}" onchange="saveProgress(this)">
-                                        <label for="step-${result.URL}-${v.Name}-${index}">
-                                            <strong>${escapeHtml(step.Stage)}:</strong>
-                                            <pre><code>${escapeHtml(step.Command)}</code></pre>
-                                        </label>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        `;
-                    }
-
-                    return `
-                        <div class="detail-block">
-                            <h4>${v.Name} (${v.Severity})</h4>
-                            <p><strong>Description:</strong> ${escapeHtml(v.Description)}</p>
-                            <p class="text-sm"><strong class="font-semibold">Recommendation:</strong> <span id="details-recommendation"></span></p>
-
-                        <div id="details-cves-section" style="display: none; margin-top: 15px;">
-                            <h5 class="font-semibold text-gray-300">Related CVEs:</h5>
-                            <ul id="details-cves-list" class="list-disc list-inside text-gray-400 text-sm"></ul>
-                        </div>
-                            ${attackFlowHTML}
-                            ${mitreHTML}
-                        </div>
-                    `;
-                }).join('');
+        function showDetails(resultIndex, vulnIndex) {
+            const result = processedResults[resultIndex];
+            const vuln = result.Vulnerabilities[vulnIndex];
+        
+            document.getElementById('details-title').textContent = vuln.Name;
+            document.getElementById('details-severity').textContent = vuln.Severity;
+            document.getElementById('details-severity').className = `severity-${vuln.Severity.toLowerCase()}`;
+            document.getElementById('details-description').textContent = vuln.Description;
+            document.getElementById('details-recommendation').textContent = vuln.Recommendation;
+        
+            const attackFlowContainer = document.getElementById('details-attack-flow');
+            attackFlowContainer.innerHTML = '';
+            if (vuln.AttackFlow && vuln.AttackFlow.length > 0) {
+                const flowList = document.createElement('ul');
+                flowList.className = 'list-disc list-inside text-gray-400 text-sm';
+                vuln.AttackFlow.forEach(step => {
+                    const item = document.createElement('li');
+                    item.innerHTML = `<strong>${step.Technique}:</strong> ${step.Command}`;
+                    flowList.appendChild(item);
+                });
+                attackFlowContainer.innerHTML = '<h5 class=\"font-semibold text-gray-300\">Attack Flow:</h5>';
+                attackFlowContainer.appendChild(flowList);
             }
-
-            detailsContent.innerHTML = `
-                <h3>${result.URL}</h3>
-                <div class="detail-block">
-                    <p><strong>Status Code:</strong> ${result.StatusCode}</p>
-                    <p><strong>Content-Length:</strong> ${result.ContentLength} bytes</p>
-                </div>
-                ${vulnerabilitiesHTML}
-            `;
-
-            result.Vulnerabilities.forEach((vuln, vulnIndex) => {
-                document.getElementById('details-recommendation').textContent = vuln.Recommendation;
-
-                const cvesSection = document.getElementById('details-cves-section');
-                const cvesList = document.getElementById('details-cves-list');
-                cvesList.innerHTML = '';
-                if (vuln.CVEs && vuln.CVEs.length > 0) {
-                    vuln.CVEs.forEach(cve => {
-                        const listItem = document.createElement('li');
-                        listItem.innerHTML = `<a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=${cve.ID}" target="_blank" class="text-blue-400 hover:underline">${cve.ID}</a> (CVSS: ${cve.CVSS}) - ${cve.Summary}`;
-                        cvesList.appendChild(listItem);
-                    });
-                    cvesSection.style.display = 'block';
-                } else {
-                    cvesSection.style.display = 'none';
-                }
-            });
+        
+            const mitreContainer = document.getElementById('details-mitre');
+            mitreContainer.innerHTML = '';
+            if (vuln.MITRETechniqueID) {
+                mitreContainer.innerHTML = `<h5 class=\"font-semibold text-gray-300\">MITRE ATT&CK®:</h5><p class=\"text-sm\"><a href=\"${vuln.MITRETechniqueURL}\" target=\"_blank\" class=\"text-blue-400 hover:underline\">${vuln.MITRETechniqueID}: ${vuln.MITRETechniqueName}</a></p>`;
+            }
+        
+            const cvesSection = document.getElementById('details-cves-section');
+            const cvesList = document.getElementById('details-cves-list');
+            cvesList.innerHTML = '';
+            if (vuln.CVEs && vuln.CVEs.length > 0) {
+                vuln.CVEs.forEach(cve => {
+                    const listItem = document.createElement('li');
+                    listItem.innerHTML = `<a href=\"https://cve.mitre.org/cgi-bin/cvename.cgi?name=${cve.ID}\" target=\"_blank\" class=\"text-blue-400 hover:underline\">${cve.ID}</a> (CVSS: ${cve.CVSS}) - ${cve.Summary}`;
+                    cvesList.appendChild(listItem);
+                });
+                cvesSection.style.display = 'block';
+            } else {
+                cvesSection.style.display = 'none';
+            }
+        
+            document.getElementById('details-panel').style.display = 'block';
         }
 
         function saveProgress(checkbox) {
@@ -359,6 +334,9 @@ sekurlsa::logonpasswords</code></pre>
 
         function updateAgentsTable(agents) {
             c2TableBody.innerHTML = '';
+            const internalMapContent = document.getElementById('internal-map-content');
+            internalMapContent.innerHTML = ''; // Limpar o mapa antigo
+
             for (const id in agents) {
                 const agent = agents[id];
                 const row = document.createElement('tr');
@@ -373,6 +351,20 @@ sekurlsa::logonpasswords</code></pre>
                     <td style="padding: 8px;">${agent.status}</td>
                 `;
                 c2TableBody.appendChild(row);
+
+                // Preencher o mapa da rede interna
+                if (agent.internal_scan_results && agent.internal_scan_results.length > 0) {
+                    const agentMapDiv = document.createElement('div');
+                    agentMapDiv.style.marginBottom = '15px';
+                    let agentMapHTML = `<h5>Results from Agent: ${agent.id} (${agent.hostname})</h5>`;
+                    agentMapHTML += '<ul class="list-disc list-inside text-gray-400 text-sm">';
+                    agent.internal_scan_results.forEach(host => {
+                        agentMapHTML += `<li>${host}</li>`;
+                    });
+                    agentMapHTML += '</ul>';
+                    agentMapDiv.innerHTML = agentMapHTML;
+                    internalMapContent.appendChild(agentMapDiv);
+                }
             }
         }
 

