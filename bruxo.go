@@ -119,30 +119,7 @@ type AttackScenario struct {
 	SuccessProbability string         `json:"SuccessProbability"`
 }
 
-type AttackRule struct {
-	Name              string
-	Conditions        []string // List of vulnerability names that must be present
-	ResultingScenario AttackScenario
-}
 
-var attackRules = []AttackRule{
-	{
-		Name:       "Exposed Credentials Path",
-		Conditions: []string{"Exposed Git Repository", "Sensitive File Exposed"},
-		ResultingScenario: AttackScenario{
-			Objective: "Compromise Server via Exposed Credentials",
-			Steps: []ScenarioStep{
-				{Description: "Find Exposed Git Repository", VulnerabilityName: "Exposed Git Repository"},
-				{Description: "Extract Sensitive Files (e.g., .env)", VulnerabilityName: "Sensitive File Exposed"},
-				{Description: "Use Credentials to Access Services", VulnerabilityName: "Sensitive File Exposed"},
-				{Description: "Achieve Initial Foothold", VulnerabilityName: "Sensitive File Exposed"},
-			},
-			EstimatedTime:      "1-2 hours",
-			SuccessProbability: "90%",
-		},
-	},
-	// Futuras regras podem ser adicionadas aqui
-}
 
 type Agent struct {
 	ID                  string    `json:"id"`
@@ -439,12 +416,18 @@ func (b *BruxoEngine) Scan() error {
 	}
 
 	if b.config.EnableAttackFlow {
-		for i := range b.results {
-			result := &b.results[i]
-			for j := range result.Vulnerabilities {
-				vuln := &result.Vulnerabilities[j]
-				b.generateAttackFlow(vuln, result.URL)
-			}
+		b.generateAttackScenarios()
+	}
+
+	if b.config.GeneratePhishingCampaign != "" {
+		b.generatePhishingCampaign()
+	}
+
+	for i := range b.results {
+		result := &b.results[i]
+		for j := range result.Vulnerabilities {
+			vuln := &result.Vulnerabilities[j]
+			b.generateAttackFlow(vuln, result.URL)
 		}
 	}
 
@@ -1399,60 +1382,8 @@ func (b *BruxoEngine) performBulkAIAnalysis() {
 	// Implementação da análise em massa com IA
 }
 
-func (b *BruxoEngine) getAIAnalysisForURL(result *ScanResult) (string, error) {
-	if b.config.GroqAPIKey == "" {
-		return "", fmt.Errorf("Groq API key not provided")
-	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
 
-	var bodySnippet string
-	// Implementar a lógica para obter o body do resultado
-	// bodySnippet = string(result.Body)[:200]
-
-	prompt := fmt.Sprintf("Analyze the following HTTP response from the URL %s and identify potential vulnerabilities. Provide a brief, one-paragraph summary. Response headers: %v. Response body snippet: %s",
-		result.URL, result.Headers, bodySnippet)
-
-	requestBody, err := json.Marshal(OpenAIRequest{
-		Model: "llama3-8b-8192",
-		Messages: []OpenAIMessage{
-			{Role: "system", Content: "You are a cybersecurity expert. Analyze the provided HTTP response for security flaws."},
-			{Role: "user", Content: prompt},
-		},
-	})
-	if err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewBuffer(requestBody))
-	if err != nil {
-		return "", err
-	}
-
-	req.Header.Set("Authorization", "Bearer "+b.config.GroqAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	var openAIResp OpenAIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&openAIResp); err != nil {
-		return "", err
-	}
-
-	if openAIResp.Error != nil {
-		return "", fmt.Errorf("Groq API error: %s", openAIResp.Error.Message)
-	}
-
-	if len(openAIResp.Choices) > 0 {
-		return openAIResp.Choices[0].Message.Content, nil
-	}
-
-	return "No analysis available.", nil
-}
 
 func (b *BruxoEngine) isPathFiltered(path string) bool {
 	for _, ext := range b.config.FilterExtensions {
