@@ -51,6 +51,42 @@
         #details-panel p { margin: 5px 0; background-color: #2a2a2a; padding: 8px; border-radius: 4px; }
         #details-panel pre { background-color: #111; padding: 10px; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; }
 
+        /* Post-Exploitation Panel Styles */
+        #post-exploitation-panel {
+            grid-column: 1 / -1; /* Make it span the full width */
+            border-top: 4px solid #f44336; /* Red border to indicate danger */
+            margin-top: 20px;
+        }
+        .playbook-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .playbook-section h4 {
+            color: #FF9800; /* Orange */
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+        }
+        .playbook-section ul {
+            list-style: none;
+            padding: 0;
+        }
+        .playbook-section li {
+            background-color: #2a2a2a;
+            padding: 8px;
+            border-radius: 4px;
+            margin-bottom: 5px;
+            font-family: 'Fira Code', monospace;
+        }
+        .playbook-section pre {
+            background-color: #111;
+            padding: 10px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'Fira Code', monospace;
+        }
+
     </style>
 </head>
 <body>
@@ -74,6 +110,26 @@
             <div id="details-panel" class="panel">
                 <h3>Details</h3>
                 <div id="details-content">Select an item from the Heatmap or Attack Path to see details.</div>
+            </div>
+
+            <div id="post-exploitation-panel" class="panel" style="display: none;">
+                <h3>Post-Exploitation Playbook</h3>
+                <div class="playbook-grid">
+                    <div class="playbook-section">
+                        <h4>Suggested Tools</h4>
+                        <ul>
+                            <li><strong>Metasploit:</strong> exploit/multi/handler</li>
+                            <li><strong>Cobalt Strike:</strong> Beacon</li>
+                            <li><strong>BloodHound:</strong> AD Mapping</li>
+                        </ul>
+                    </div>
+                    <div class="playbook-section">
+                        <h4>Recommended Commands</h4>
+                        <pre><code>whoami /all
+net user /domain
+sekurlsa::logonpasswords</code></pre>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -136,6 +192,18 @@
                 </div>
                 ${vulnerabilitiesHTML}
             `;
+        }
+
+        // 4. Post-Exploitation Panel Logic
+        const hasHighOrCriticalVuln = processedResults.some(r => 
+            r.highestSeverity === 'Critical' || r.highestSeverity === 'High'
+        );
+
+        if (hasHighOrCriticalVuln) {
+            const postExploitationPanel = document.getElementById('post-exploitation-panel');
+            if(postExploitationPanel) {
+                postExploitationPanel.style.display = 'block';
+            }
         }
 
     </script>
