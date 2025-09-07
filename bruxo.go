@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/chromedp/cdproto/page"
 
 	"github.com/chromedp/chromedp"
+	"github.com/gorilla/websocket"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/time/rate"
 )
@@ -44,25 +46,26 @@ const (
 )
 
 type BruxoEngine struct {
-	config          *Config
-	results         []ScanResult
-	progress        Progress
-	visited         sync.Map
-	mu              sync.Mutex
-	logger          *Logger
-	rateLimiter     *rate.Limiter
-	ctx             context.Context
-	cancel          context.CancelFunc
-	workQueue       chan string
-	resultsChan     chan ScanResult
-	wg              sync.WaitGroup
-	workerWg        sync.WaitGroup
-	httpClient      *fasthttp.Client
-	baseStatusCode  int
-	baseHash        uint32
-	chatAnalysis    string
-	attackScenarios []AttackScenario
+	config           *Config
+	results          []ScanResult
+	progress         Progress
+	visited          sync.Map
+	mu               sync.Mutex
+	logger           *Logger
+	rateLimiter      *rate.Limiter
+	ctx              context.Context
+	cancel           context.CancelFunc
+	workQueue        chan string
+	resultsChan      chan ScanResult
+	wg               sync.WaitGroup
+	workerWg         sync.WaitGroup
+	httpClient       *fasthttp.Client
+	baseStatusCode   int
+	baseHash         uint32
+	chatAnalysis     string
+	attackScenarios  []AttackScenario
 	phishingCampaign *PhishingCampaign
+	wsHub            *Hub
 
 	// C2 Fields
 	c2Agents map[string]*Agent
@@ -71,27 +74,27 @@ type BruxoEngine struct {
 }
 
 type Config struct {
-	TargetURL         string
-	WordlistPath      string
-	NumThreads        int
-	OutputFile        string
-	Format            string
-	ShowStatusCodes   []int
-	FilterStatusCodes []int
-	FilterExtensions  []string
-	Extensions        []string
-	RateLimit         int
-	Verbose           bool
-	Debug             bool
-	Timeout           int
-	FindHidden        bool
-	GroqAPIKey        string
-	EnableAttackFlow  bool
-	RedTeamToolURL    string
-	ReportFormat      string
-	ReportType        string
-	AssetValue        string
-	EnableCVELookup         bool
+	TargetURL                string
+	WordlistPath             string
+	NumThreads               int
+	OutputFile               string
+	Format                   string
+	ShowStatusCodes          []int
+	FilterStatusCodes        []int
+	FilterExtensions         []string
+	Extensions               []string
+	RateLimit                int
+	Verbose                  bool
+	Debug                    bool
+	Timeout                  int
+	FindHidden               bool
+	GroqAPIKey               string
+	EnableAttackFlow         bool
+	RedTeamToolURL           string
+	ReportFormat             string
+	ReportType               string
+	AssetValue               string
+	EnableCVELookup          bool
 	GeneratePhishingCampaign string
 }
 
@@ -142,13 +145,13 @@ var attackRules = []AttackRule{
 }
 
 type Agent struct {
-	ID        string    `json:"id"`
-	IPAddress string    `json:"ip_address"`
-	Hostname  string    `json:"hostname"`
-	OS        string    `json:"os"`
-	LastSeen  time.Time `json:"last_seen"`
-	Status              string   `json:"status"`
-	InternalScanResults []string `json:"internal_scan_results,omitempty"`
+	ID                  string    `json:"id"`
+	IPAddress           string    `json:"ip_address"`
+	Hostname            string    `json:"hostname"`
+	OS                  string    `json:"os"`
+	LastSeen            time.Time `json:"last_seen"`
+	Status              string    `json:"status"`
+	InternalScanResults []string  `json:"internal_scan_results,omitempty"`
 	taskQueue           chan Task `json:"-"` // Not serialized
 }
 
@@ -160,17 +163,17 @@ type Task struct {
 }
 
 type Vulnerability struct {
-	Name               string     `json:"Name"`
-	Severity           string     `json:"Severity"`
-	Description        string     `json:"Description"`
-	Recommendation     string     `json:"Recommendation"`
-	AttackFlow         AttackFlow `json:"AttackFlow"`
+	Name                string     `json:"Name"`
+	Severity            string     `json:"Severity"`
+	Description         string     `json:"Description"`
+	Recommendation      string     `json:"Recommendation"`
+	AttackFlow          AttackFlow `json:"AttackFlow"`
 	BusinessImpactScore int        `json:"BusinessImpactScore"`
 	EstimatedRepairTime string     `json:"EstimatedRepairTime,omitempty"`
-	CVEs               []CVEInfo  `json:"CVEs,omitempty"`
-	MITRETechniqueID   string     `json:"MITRETechniqueID,omitempty"`
-	MITRETechniqueName string     `json:"MITRETechniqueName,omitempty"`
-	MITRETechniqueURL  string     `json:"MITRETechniqueURL,omitempty"`
+	CVEs                []CVEInfo  `json:"CVEs,omitempty"`
+	MITRETechniqueID    string     `json:"MITRETechniqueID,omitempty"`
+	MITRETechniqueName  string     `json:"MITRETechniqueName,omitempty"`
+	MITRETechniqueURL   string     `json:"MITRETechniqueURL,omitempty"`
 }
 
 type Evidence struct {
@@ -294,7 +297,10 @@ func NewBruxoEngine(config *Config) *BruxoEngine {
 		},
 		c2Agents: make(map[string]*Agent),
 		c2Tasks:  make(map[string]*Task),
+		wsHub:    newHub(),
 	}
+
+	go engine.wsHub.run()
 
 	if config.FindHidden {
 		engine.getBaseResponse()
@@ -706,7 +712,7 @@ func (b *BruxoEngine) generatePhishingCampaign() {
 		"role": "user",
 		"content": "Target Persona: %s. Scan results:\n%s"
 	}`,
-	b.config.GeneratePhishingCampaign, string(vulnSummary))
+		b.config.GeneratePhishingCampaign, string(vulnSummary))
 
 	// 3. Chamar a API da Groq
 	client := &http.Client{Timeout: 120 * time.Second}
@@ -818,6 +824,91 @@ func (b *BruxoEngine) identifyTechnologies(resp *fasthttp.Response, result *Scan
 	}
 }
 
+// WebSocket Hub
+type Hub struct {
+	clients    map[*Client]bool
+	broadcast  chan []byte
+	register   chan *Client
+	unregister chan *Client
+}
+
+type Client struct {
+	hub  *Hub
+	conn *websocket.Conn
+	send chan []byte
+}
+
+func newHub() *Hub {
+	return &Hub{
+		broadcast:  make(chan []byte),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		clients:    make(map[*Client]bool),
+	}
+}
+
+func (h *Hub) run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.clients[client] = true
+		case client := <-h.unregister:
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				close(client.send)
+			}
+		case message := <-h.broadcast:
+			for client := range h.clients {
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(h.clients, client)
+				}
+			}
+		}
+	}
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true }, // Permite todas as origens
+}
+
+func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
+	client.hub.register <- client
+
+	go client.writePump()
+	go client.readPump()
+}
+
+func (c *Client) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+	for {
+		_, _, err := c.conn.ReadMessage()
+		if err != nil {
+			break
+		}
+	}
+}
+
+func (c *Client) writePump() {
+	defer c.conn.Close()
+	for message := range c.send {
+		c.conn.WriteMessage(websocket.TextMessage, message)
+	}
+}
+
 func (b *BruxoEngine) generateReport() error {
 	switch b.config.ReportFormat {
 	case "html":
@@ -841,7 +932,7 @@ func (b *BruxoEngine) renderHTMLReport(outputPath, templateName string) error {
 	defer file.Close()
 
 	funcMap := template.FuncMap{
-		"ToLower": strings.ToLower,
+		"ToLower":  strings.ToLower,
 		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
 	}
 
@@ -935,15 +1026,15 @@ func (b *BruxoEngine) prepareTemplateData() map[string]interface{} {
 		"Results":          b.results,
 		"PrioritizedVulns": allVulns,
 		"TargetURL":        b.config.TargetURL,
-		"GeneratedAt":     time.Now().Format(time.RFC1123),
-		"TotalFound":      len(b.results),
-		"ChatAnalysis":    b.chatAnalysis,
-		"AttackScenarios": b.attackScenarios,
-		"CriticalCount":   criticalCount,
-		"HighCount":       highCount,
-		"MediumCount":     mediumCount,
-		"LowCount":        lowCount,
-		"ScanDate":        time.Now().Format("January 2, 2006"),
+		"GeneratedAt":      time.Now().Format(time.RFC1123),
+		"TotalFound":       len(b.results),
+		"ChatAnalysis":     b.chatAnalysis,
+		"AttackScenarios":  b.attackScenarios,
+		"CriticalCount":    criticalCount,
+		"HighCount":        highCount,
+		"MediumCount":      mediumCount,
+		"LowCount":         lowCount,
+		"ScanDate":         time.Now().Format("January 2, 2006"),
 		"PhishingCampaign": b.phishingCampaign,
 	}
 }
@@ -973,6 +1064,11 @@ func (b *BruxoEngine) analyzeVulnerabilities(result *ScanResult, body []byte) {
 			Recommendation: "Immediately restrict access to the .git directory. Use tools like 'git-dumper' to download the source code and analyze it for secrets.",
 		}
 		result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+
+		if vuln.Severity == "Critical" || vuln.Severity == "High" {
+			alertMsg := fmt.Sprintf("🚨 New High/Critical Vulnerability: %s at %s", vuln.Name, result.URL)
+			b.wsHub.broadcast <- []byte(alertMsg)
+		}
 	}
 
 	loginPaths := []string{"/login", "/admin", "/user", "/wp-login.php", "/administrator/"}
@@ -1207,6 +1303,8 @@ func (b *BruxoEngine) generateAttackScenarios() {
 			b.logger.Error("Error unmarshalling AI-generated scenarios: %v", err)
 		} else {
 			b.logger.Info("Successfully generated %d attack scenarios with AI.", len(b.attackScenarios))
+			alertMsg := fmt.Sprintf("🧠 New AI Attack Scenario Generated: %s", b.attackScenarios[0].Objective)
+			b.wsHub.broadcast <- []byte(alertMsg)
 		}
 	}
 }
@@ -1470,6 +1568,9 @@ func (b *BruxoEngine) startC2Server() {
 	http.HandleFunc("/api/agents/", b.handlePostTask)
 	http.HandleFunc("/api/tasks/", b.handleGetTaskResult)
 	http.HandleFunc("/c2/upload/", b.handleC2Upload)
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		serveWs(b.wsHub, w, r)
+	})
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		b.logger.Error("C2 server failed: %v", err)
@@ -1510,6 +1611,9 @@ func (b *BruxoEngine) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	b.c2Mutex.Unlock()
 
 	b.logger.Info("New agent checked in: %s from %s (%s)", agentID, newAgent.IPAddress, newAgent.OS)
+
+	alertMsg := fmt.Sprintf("✅ New C2 Agent Checked In: %s (%s)", newAgent.Hostname, newAgent.IPAddress)
+	b.wsHub.broadcast <- []byte(alertMsg)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
