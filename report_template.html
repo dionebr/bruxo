@@ -133,7 +133,7 @@
                         <p class="font-semibold text-gray-300">Steps:</p>
                         <ul class="list-disc list-inside text-gray-400" style="padding-left: 20px;">
                             {{range .Steps}}
-                            <li>{{.}}</li>
+                            <li class="scenario-step" style="cursor: pointer;" data-command="{{.Command}}" data-target="{{.TargetURL}}">{{.Description}}</li>
                             {{end}}
                         </ul>
                     </div>
@@ -410,6 +410,37 @@ sekurlsa::logonpasswords</code></pre>
                 }
             }, 2000); // Poll every 2 seconds
         }
+
+        document.querySelectorAll('.scenario-step').forEach(item => {
+            item.addEventListener('click', event => {
+                const command = event.target.getAttribute('data-command');
+                const targetUrl = event.target.getAttribute('data-target');
+
+                if (!command || !targetUrl) return;
+
+                // Encontrar um agente que corresponda ao host do alvo
+                const targetHost = new URL(targetUrl).host;
+                let targetAgent = null;
+                const agentsTable = document.querySelector('#c2-agents-table tbody');
+                for (const row of agentsTable.rows) {
+                    // Supondo que o IP do agente é o host do alvo
+                    if (row.cells[1].innerText.includes(targetHost)) {
+                        const agentId = row.cells[0].innerText;
+                        targetAgent = { id: agentId }; // Simplificado, poderia buscar o objeto completo
+                        break;
+                    }
+                }
+
+                if (targetAgent) {
+                    openTerminal(targetAgent);
+                    const terminalInput = document.getElementById('terminal-input');
+                    terminalInput.value = command;
+                    terminalInput.focus();
+                } else {
+                    alert(`No active C2 agent found for target: ${targetHost}`);
+                }
+            });
+        });
 
         setInterval(fetchAgents, 5000); // Fetch agents every 5 seconds
         fetchAgents(); // Initial fetch

@@ -93,11 +93,18 @@ type AttackStep struct {
 
 type AttackFlow []AttackStep
 
+type ScenarioStep struct {
+	Description      string `json:"Description"`
+	Command          string `json:"Command"`
+	TargetURL        string `json:"TargetURL"`
+	VulnerabilityName string `json:"VulnerabilityName"`
+}
+
 type AttackScenario struct {
-	Objective          string   `json:"Objective"`
-	Steps              []string `json:"Steps"`
-	EstimatedTime      string   `json:"EstimatedTime"`
-	SuccessProbability string   `json:"SuccessProbability"`
+	Objective          string         `json:"Objective"`
+	Steps              []ScenarioStep `json:"Steps"`
+	EstimatedTime      string         `json:"EstimatedTime"`
+	SuccessProbability string         `json:"SuccessProbability"`
 }
 
 type AttackRule struct {
@@ -111,8 +118,13 @@ var attackRules = []AttackRule{
 		Name:       "Exposed Credentials Path",
 		Conditions: []string{"Exposed Git Repository", "Sensitive File Exposed"},
 		ResultingScenario: AttackScenario{
-			Objective:          "Compromise Server via Exposed Credentials",
-			Steps:              []string{"Find Exposed Git Repository", "Extract Sensitive Files (e.g., .env)", "Use Credentials to Access Services", "Achieve Initial Foothold"},
+			Objective: "Compromise Server via Exposed Credentials",
+			Steps: []ScenarioStep{
+				{Description: "Find Exposed Git Repository", VulnerabilityName: "Exposed Git Repository"},
+				{Description: "Extract Sensitive Files (e.g., .env)", VulnerabilityName: "Sensitive File Exposed"},
+				{Description: "Use Credentials to Access Services", VulnerabilityName: "Sensitive File Exposed"},
+				{Description: "Achieve Initial Foothold", VulnerabilityName: "Sensitive File Exposed"},
+			},
 			EstimatedTime:      "1-2 hours",
 			SuccessProbability: "90%",
 		},
@@ -845,27 +857,61 @@ func (b *BruxoEngine) collectEvidence(body []byte, sourceURL string) []Evidence 
 }
 
 func (b *BruxoEngine) generateAttackScenarios() {
-	// 1. Criar um set com todas as vulnerabilidades encontradas para busca rápida
-	foundVulns := make(map[string]bool)
-	for _, result := range b.results {
-		for _, vuln := range result.Vulnerabilities {
-			foundVulns[vuln.Name] = true
-		}
+	if b.config.GroqAPIKey == "" {
+		b.logger.Info("Groq API key not provided, skipping AI scenario generation.")
+		return
 	}
 
-	// 2. Iterar sobre as regras e verificar se as condições são atendidas
-	for _, rule := range attackRules {
-		conditionsMet := true
-		for _, condition := range rule.Conditions {
-			if !foundVulns[condition] {
-				conditionsMet = false
-				break
-			}
-		}
+	// 1. Coletar dados para a IA
+	vulnSummary, err := json.MarshalIndent(b.results, "", "  ")
+	if err != nil {
+		b.logger.Error("Error creating vulnerability summary for AI: %v", err)
+		return
+	}
 
-		if conditionsMet {
-			b.attackScenarios = append(b.attackScenarios, rule.ResultingScenario)
-			b.logger.Info("Generated attack scenario: %s", rule.Name)
+	// 2. Criar o prompt
+	prompt := fmt.Sprintf(`{
+		"role": "system",
+		"content": "You are a world-class Red Team operator. Analyze the provided JSON output from a web scanner and generate 1 to 3 plausible attack scenarios. For each scenario, provide an objective, a list of steps, an estimated time, and a success probability. Respond ONLY with a valid JSON array of scenarios."
+	},
+	{
+		"role": "user",
+		"content": "Scan results:\n%s"
+	}`,
+	string(vulnSummary))
+
+	// 3. Chamar a API da Groq
+	client := &http.Client{Timeout: 120 * time.Second}
+	requestBody := fmt.Sprintf(`{"messages": [%s], "model": "llama3-70b-8192"}`, prompt)
+
+	req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewBuffer([]byte(requestBody)))
+	if err != nil {
+		b.logger.Error("Error creating AI request: %v", err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+b.config.GroqAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		b.logger.Error("Error calling Groq API: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 4. Processar a resposta
+	var openAIResp OpenAIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&openAIResp); err != nil {
+		b.logger.Error("Error decoding AI response: %v", err)
+		return
+	}
+
+	if len(openAIResp.Choices) > 0 {
+		content := openAIResp.Choices[0].Message.Content
+		if err := json.Unmarshal([]byte(content), &b.attackScenarios); err != nil {
+			b.logger.Error("Error unmarshalling AI-generated scenarios: %v", err)
+		} else {
+			b.logger.Info("Successfully generated %d attack scenarios with AI.", len(b.attackScenarios))
 		}
 	}
 }

