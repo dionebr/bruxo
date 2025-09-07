@@ -101,8 +101,9 @@ type ScanResult struct {
 	StatusCode      int             `json:"StatusCode"`
 	ContentLength   int             `json:"ContentLength"`
 	ResponseTime    time.Duration   `json:"ResponseTime"`
-	ContentType     string          `json:"ContentType"`
-	Title           string          `json:"Title"`
+	ContentType     string            `json:"ContentType"`
+	Headers         map[string]string `json:"Headers"`
+	Title           string            `json:"Title"`
 	Category        string          `json:"Category"`
 	IsHidden        bool            `json:"IsHidden"`
 	Error           string          `json:"Error"`
@@ -375,6 +376,11 @@ func (b *BruxoEngine) scanURL(urlStr string) ScanResult {
 		}
 	}
 
+	headers := make(map[string]string)
+	resp.Header.VisitAll(func(key, value []byte) {
+		headers[string(key)] = string(value)
+	})
+
 	if b.shouldShowResult(statusCode) || isHidden {
 		title = extractTitle(body)
 	}
@@ -385,6 +391,7 @@ func (b *BruxoEngine) scanURL(urlStr string) ScanResult {
 		ContentLength: len(body),
 		ResponseTime:  time.Since(start),
 		ContentType:   string(resp.Header.ContentType()),
+		Headers:       headers,
 		Title:         title,
 		Category:      b.categorizePath(urlStr),
 		IsHidden:      isHidden,
@@ -629,6 +636,39 @@ func (b *BruxoEngine) analyzeVulnerabilities(result *ScanResult) {
 			}
 			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
 			break
+		}
+	}
+
+		// Análise de Cabeçalhos HTTP
+	if len(result.Headers) > 0 {
+		// Verificação de Divulgação de Tecnologia
+		if serverHeader, ok := result.Headers["Server"]; ok {
+			vuln := Vulnerability{
+				Name:           "Technology Disclosure (Server Header)",
+				Severity:       "Informational",
+				Description:    fmt.Sprintf("The Server header revealed the following technology: %s. This information can help an attacker find known vulnerabilities.", serverHeader),
+				Recommendation: "Consider removing or obfuscating the Server header to avoid revealing specific software versions.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
+		}
+
+		// Verificação de Cabeçalhos de Segurança Ausentes
+		missingHeaders := []string{}
+		securityHeaders := []string{"Content-Security-Policy", "Strict-Transport-Security", "X-Content-Type-Options", "X-Frame-Options"}
+		for _, h := range securityHeaders {
+			if _, ok := result.Headers[h]; !ok {
+				missingHeaders = append(missingHeaders, h)
+			}
+		}
+
+		if len(missingHeaders) > 0 {
+			vuln := Vulnerability{
+				Name:           "Missing Security Headers",
+				Severity:       "Low",
+				Description:    fmt.Sprintf("The following security headers are missing: %s. Their absence can expose the application to attacks like clickjacking and cross-site scripting (XSS).", strings.Join(missingHeaders, ", ")),
+				Recommendation: "Implement the missing security headers according to security best practices to harden the application.",
+			}
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln)
 		}
 	}
 
