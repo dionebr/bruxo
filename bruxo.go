@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"github.com/chromedp/cdproto/page"
 	"flag"
 	"fmt"
 	"html/template"
@@ -24,6 +23,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/chromedp/cdproto/page"
 
 	"github.com/chromedp/chromedp"
 	"github.com/valyala/fasthttp"
@@ -43,23 +44,23 @@ const (
 )
 
 type BruxoEngine struct {
-	config         *Config
-	results        []ScanResult
-	progress       Progress
-	visited        sync.Map
-	mu             sync.Mutex
-	logger         *Logger
-	rateLimiter    *rate.Limiter
-	ctx            context.Context
-	cancel         context.CancelFunc
-	workQueue      chan string
-	resultsChan    chan ScanResult
-	wg             sync.WaitGroup
-	workerWg       sync.WaitGroup
-	httpClient     *fasthttp.Client
-	baseStatusCode int
-	baseHash       uint32
-	chatAnalysis   string
+	config          *Config
+	results         []ScanResult
+	progress        Progress
+	visited         sync.Map
+	mu              sync.Mutex
+	logger          *Logger
+	rateLimiter     *rate.Limiter
+	ctx             context.Context
+	cancel          context.CancelFunc
+	workQueue       chan string
+	resultsChan     chan ScanResult
+	wg              sync.WaitGroup
+	workerWg        sync.WaitGroup
+	httpClient      *fasthttp.Client
+	baseStatusCode  int
+	baseHash        uint32
+	chatAnalysis    string
 	attackScenarios []AttackScenario
 
 	// C2 Fields
@@ -98,9 +99,9 @@ type AttackStep struct {
 type AttackFlow []AttackStep
 
 type ScenarioStep struct {
-	Description      string `json:"Description"`
-	Command          string `json:"Command"`
-	TargetURL        string `json:"TargetURL"`
+	Description       string `json:"Description"`
+	Command           string `json:"Command"`
+	TargetURL         string `json:"TargetURL"`
 	VulnerabilityName string `json:"VulnerabilityName"`
 }
 
@@ -703,17 +704,17 @@ func (b *BruxoEngine) prepareTemplateData() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"Results":          b.results,
-		"TargetURL":        b.config.TargetURL,
-		"GeneratedAt":      time.Now().Format(time.RFC1123),
-		"TotalFound":       len(b.results),
-		"ChatAnalysis":     b.chatAnalysis,
-		"AttackScenarios":  b.attackScenarios,
-		"CriticalCount":    criticalCount,
-		"HighCount":        highCount,
-		"MediumCount":      mediumCount,
-		"LowCount":         lowCount,
-		"ScanDate":         time.Now().Format("January 2, 2006"),
+		"Results":         b.results,
+		"TargetURL":       b.config.TargetURL,
+		"GeneratedAt":     time.Now().Format(time.RFC1123),
+		"TotalFound":      len(b.results),
+		"ChatAnalysis":    b.chatAnalysis,
+		"AttackScenarios": b.attackScenarios,
+		"CriticalCount":   criticalCount,
+		"HighCount":       highCount,
+		"MediumCount":     mediumCount,
+		"LowCount":        lowCount,
+		"ScanDate":        time.Now().Format("January 2, 2006"),
 	}
 }
 
@@ -942,7 +943,7 @@ func (b *BruxoEngine) generateAttackScenarios() {
 		"role": "user",
 		"content": "Scan results:\n%s"
 	}`,
-	string(vulnSummary))
+		string(vulnSummary))
 
 	// 3. Chamar a API da Groq
 	client := &http.Client{Timeout: 120 * time.Second}
@@ -1163,7 +1164,7 @@ func main() {
 	flag.StringVar(&config.Format, "f", "html", "Output format (json, html)")
 	flag.StringVar(&showCodes, "sc", "200,204,301,302,307,403", "Show specific status codes (comma-separated)")
 	flag.StringVar(&filterCodes, "fc", "", "Filter specific status codes (comma-separated)")
-	flag.StringVar(&extensions, "e", "", "Append extensions to wordlist entries (e.g., .php,.html)")
+	flag.StringVar(&extensions, "x", "", "Append extensions to wordlist entries (e.g., .php,.html)")
 	flag.StringVar(&filterExtensions, "fx", "css,js,png,jpg,jpeg,svg,ico,woff,woff2,eot,ttf", "Filter out specific extensions (comma-separated)")
 	flag.IntVar(&config.RateLimit, "rl", 1000, "Rate limit in requests per second")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose mode")

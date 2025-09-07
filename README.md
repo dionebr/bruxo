@@ -1,8 +1,8 @@
-# 🧙 Bruxo - Plataforma de Red Team com IA
+# Bruxo - Plataforma de Red Team com IA
 
 Bruxo é uma plataforma de segurança ofensiva de ponta que vai além de um simples scanner de vulnerabilidades. Ele integra um motor de varredura rápido, um painel de C2 (Comando e Controle) interativo e um simulador de cenários de ataque alimentado por IA para fornecer uma visão completa e acionável do postura de segurança de um alvo.
 
-## ✨ Principais Funcionalidades
+## Principais Funcionalidades
 
 - **Scanner de Diretórios Rápido**: Utiliza `fasthttp` e concorrência para escanear diretórios e arquivos em alta velocidade.
 - **Análise de Vulnerabilidades**: Detecta automaticamente vulnerabilidades comuns como repositórios Git expostos, arquivos de configuração sensíveis e cabeçalhos de segurança ausentes.
@@ -15,7 +15,7 @@ Bruxo é uma plataforma de segurança ofensiva de ponta que vai além de um simp
 - **Playbooks Interativos**: Os cenários de ataque gerados são interativos. Clicar em um passo do cenário preenche automaticamente o comando correspondente no terminal do agente C2 apropriado.
 - **Relatório Tático Interativo**: Gera um relatório HTML único que serve como um dashboard tático, com heatmap de vulnerabilidades, caminhos de ataque e o painel de C2.
 
-## ⚙️ Arquitetura
+## Arquitetura
 
 O Bruxo é composto por três componentes principais:
 
@@ -23,7 +23,7 @@ O Bruxo é composto por três componentes principais:
 2.  **Agente (`agent`)**: Um implante leve que é executado no alvo. Ele se conecta ao servidor C2 para receber tarefas (comandos) e enviar resultados.
 3.  **Painel de Controle (Relatório HTML)**: A interface do usuário, que é um arquivo HTML dinâmico. Ele exibe os resultados do scan e fornece a interface interativa para o C2 e os cenários de ataque.
 
-## 🚀 Requisitos e Instalação
+## Requisitos e Instalação
 
 ### Dependências
 
@@ -56,7 +56,7 @@ O Bruxo é composto por três componentes principais:
     export GROQ_API_KEY="sua_chave_api_aqui"
     ```
 
-## 🛠️ Compilação
+## Compilação
 
 ### Compilando o Servidor Bruxo
 
@@ -82,7 +82,7 @@ Para compilar o agente para diferentes sistemas operacionais:
   cd ..
   ```
 
-## 📖 Guia de Uso
+## Guia de Uso
 
 1.  **Execute o Servidor Bruxo**:
     Inicie um scan em um alvo. O servidor C2 iniciará automaticamente na porta `:8080`.
@@ -107,3 +107,28 @@ Para compilar o agente para diferentes sistemas operacionais:
 4.  **Use os Playbooks Interativos**:
     - Analise os cenários de ataque gerados pela IA.
     - Clique em um passo de um cenário. O comando correspondente será preenchido no terminal do agente apropriado, pronto para ser executado.
+
+---
+
+## Parâmetros de Linha de Comando
+
+| Flag                | Padrão                                         | Descrição                                                                 |
+|---------------------|------------------------------------------------|---------------------------------------------------------------------------|
+| `-u`                | (obrigatório)                                  | URL do alvo para o scan.                                                  |
+| `-w`                | (obrigatório)                                  | Caminho para a wordlist.                                                  |
+| `-t`                | 50                                             | Número de threads concorrentes.                                           |
+| `-o`                | ""                                             | Arquivo de saída para o relatório.                                        |
+| `-sc`               | "200,204,301,302,307,403"                    | Códigos de status para exibir, separados por vírgula.                     |
+| `-fc`               | ""                                             | Códigos de status para filtrar (não exibir), separados por vírgula.       |
+| `-x`                | ""                                             | Extensões para adicionar a cada entrada da wordlist (ex: `.php,.html`).   |
+| `-fx`               | "css,js,png,jpg,jpeg,svg,ico,woff,woff2,eot,ttf" | Extensões ou palavras-chave para ignorar nos caminhos.                    |
+| `-rl`               | 1000                                           | Limite de requisições por segundo.                                        |
+| `-timeout`          | 10                                             | Timeout da requisição em segundos.                                        |
+| `-hidden`           | (desabilitado)                                 | Habilita a detecção de conteúdo oculto.                                   |
+| `-v`                | (desabilitado)                                 | Modo verboso.                                                             |
+| `-debug`            | (desabilitado)                                 | Modo de depuração.                                                        |
+| `--attack-flow`     | (desabilitado)                                 | Habilita a análise de fluxo de ataque.                                    |
+| `--report-format`   | "html"                                         | Formato do relatório de saída (`html`, `pdf`).                            |
+| `--report-type`     | "technical"                                    | Tipo do relatório (`technical`, `executive`).                             |
+| `--groq-api-key`    | (variável de ambiente)                         | Chave da API da Groq para análise com IA.                                 |
+| `--red-team-tool-url` | ""                                             | URL da ferramenta de Red Team para integração.                            |
