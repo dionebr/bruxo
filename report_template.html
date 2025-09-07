@@ -119,8 +119,65 @@
                 <h3>Details</h3>
                 <div id="details-content">Select an item from the Heatmap or Attack Path to see details.</div>
             </div>
+        </div>
 
-            <div id="post-exploitation-panel" class="panel" style="display: none;">
+        <!-- Seção de Cenários de Ataque -->
+        {{if .AttackScenarios}}
+        <div class="panel" style="grid-column: 1 / -1; margin-top: 20px;">
+            <h3 style="color: #f44336;">Attack Scenarios</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {{range .AttackScenarios}}
+                <div class="bg-gray-800 p-4 rounded-lg shadow-lg" style="background-color: #2a2a2a;">
+                    <h4 class="text-xl font-bold text-yellow-400 mb-3" style="color: #FFC107;">{{.Objective}}</h4>
+                    <div class="mb-3">
+                        <p class="font-semibold text-gray-300">Steps:</p>
+                        <ul class="list-disc list-inside text-gray-400" style="padding-left: 20px;">
+                            {{range .Steps}}
+                            <li>{{.}}</li>
+                            {{end}}
+                        </ul>
+                    </div>
+                    <div class="flex justify-between text-sm" style="display: flex; justify-content: space-between;">
+                        <p class="text-gray-400"><span class="font-bold text-gray-300">Est. Time:</span> {{.EstimatedTime}}</p>
+                        <p class="text-red-400"><span class="font-bold text-red-300">Success:</span> {{.SuccessProbability}}</p>
+                    </div>
+                </div>
+                {{end}}
+            </div>
+        </div>
+        {{end}}
+
+        <!-- Seção C2 -->
+        <div class="panel" style="grid-column: 1 / -1; margin-top: 20px;">
+            <h3 style="color: #4CAF50;">C2 Agents</h3>
+            <table id="c2-agents-table" style="width: 100%; text-align: left; border-collapse: collapse;">
+                <thead>
+                    <tr style="border-bottom: 1px solid #444;">
+                        <th style="padding: 8px;">ID</th>
+                        <th style="padding: 8px;">IP Address</th>
+                        <th style="padding: 8px;">Hostname</th>
+                        <th style="padding: 8px;">OS</th>
+                        <th style="padding: 8px;">Last Seen</th>
+                        <th style="padding: 8px;">Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Agentes serão inseridos aqui -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Modal do Terminal C2 -->
+        <div id="c2-terminal-modal" style="display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.7);">
+            <div style="background-color: #1e1e1e; margin: 10% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 800px; border-radius: 8px; font-family: 'Fira Code', monospace;">
+                <h4 id="terminal-title" style="color: #9c27b0;">Terminal for Agent: </h4>
+                <div id="terminal-output" style="height: 300px; background-color: #111; overflow-y: scroll; padding: 10px; border-radius: 4px; margin-bottom: 10px; white-space: pre-wrap;"></div>
+                <input type="text" id="terminal-input" style="width: calc(100% - 20px); background-color: #2a2a2a; color: #e0e0e0; border: 1px solid #444; padding: 10px; border-radius: 4px;" placeholder="Enter command...">
+                <button onclick="closeTerminal()" style="float: right;">Close</button>
+            </div>
+        </div>
+
+        <div id="post-exploitation-panel" class="panel" style="display: none;">
                 <h3>Post-Exploitation Playbook</h3>
                 <div class="playbook-grid">
                     <div class="playbook-section">
@@ -262,6 +319,80 @@ sekurlsa::logonpasswords</code></pre>
                 }
             });
         }
+
+        // C2 Panel Logic
+        const c2TableBody = document.querySelector('#c2-agents-table tbody');
+        let selectedAgentId = null;
+
+        async function fetchAgents() {
+            try {
+                const response = await fetch('/api/agents');
+                if (!response.ok) return;
+                const agents = await response.json();
+                updateAgentsTable(agents);
+            } catch (e) {
+                console.error("Error fetching agents:", e);
+            }
+        }
+
+        function updateAgentsTable(agents) {
+            c2TableBody.innerHTML = '';
+            for (const id in agents) {
+                const agent = agents[id];
+                const row = document.createElement('tr');
+                row.style.cursor = 'pointer';
+                row.onclick = () => openTerminal(agent);
+                row.innerHTML = `
+                    <td style="padding: 8px;">${agent.id}</td>
+                    <td style="padding: 8px;">${agent.ip_address}</td>
+                    <td style="padding: 8px;">${agent.hostname}</td>
+                    <td style="padding: 8px;">${agent.os}</td>
+                    <td style="padding: 8px;">${new Date(agent.last_seen).toLocaleString()}</td>
+                    <td style="padding: 8px;">${agent.status}</td>
+                `;
+                c2TableBody.appendChild(row);
+            }
+        }
+
+        function openTerminal(agent) {
+            selectedAgentId = agent.id;
+            document.getElementById('terminal-title').innerText = `Terminal for Agent: ${agent.id}`;
+            document.getElementById('terminal-output').innerHTML = ''; // Clear previous output
+            document.getElementById('c2-terminal-modal').style.display = 'block';
+            document.getElementById('terminal-input').focus();
+        }
+
+        function closeTerminal() {
+            document.getElementById('c2-terminal-modal').style.display = 'none';
+            selectedAgentId = null;
+        }
+
+        document.getElementById('terminal-input').addEventListener('keypress', async function(e) {
+            if (e.key === 'Enter' && selectedAgentId) {
+                const command = e.target.value;
+                e.target.value = '';
+                const outputDiv = document.getElementById('terminal-output');
+                outputDiv.innerHTML += `> ${escapeHtml(command)}\n`;
+
+                try {
+                    const response = await fetch(`/api/agents/${selectedAgentId}/tasks`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ command: command })
+                    });
+                    if (!response.ok) {
+                        outputDiv.innerHTML += `Error sending command.\n`;
+                    }
+                    // The result will be fetched by the agent and logged on the server side.
+                    // A more advanced version would fetch results here.
+                } catch (e) {
+                    outputDiv.innerHTML += `Error: ${e.toString()}\n`;
+                }
+            }
+        });
+
+        setInterval(fetchAgents, 5000); // Fetch agents every 5 seconds
+        fetchAgents(); // Initial fetch
 
         // 4. Post-Exploitation Panel Logic
         let hasHighOrCriticalVuln = false;

