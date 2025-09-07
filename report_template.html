@@ -288,7 +288,12 @@ sekurlsa::logonpasswords</code></pre>
                         <div class="detail-block">
                             <h4>${v.Name} (${v.Severity})</h4>
                             <p><strong>Description:</strong> ${escapeHtml(v.Description)}</p>
-                            <p><strong>Recommendation:</strong> ${escapeHtml(v.Recommendation)}</p>
+                            <p class="text-sm"><strong class="font-semibold">Recommendation:</strong> <span id="details-recommendation"></span></p>
+
+                        <div id="details-cves-section" style="display: none; margin-top: 15px;">
+                            <h5 class="font-semibold text-gray-300">Related CVEs:</h5>
+                            <ul id="details-cves-list" class="list-disc list-inside text-gray-400 text-sm"></ul>
+                        </div>
                             ${attackFlowHTML}
                             ${mitreHTML}
                         </div>
@@ -304,7 +309,24 @@ sekurlsa::logonpasswords</code></pre>
                 </div>
                 ${vulnerabilitiesHTML}
             `;
-            loadProgress();
+
+            result.Vulnerabilities.forEach((vuln, vulnIndex) => {
+                document.getElementById('details-recommendation').textContent = vuln.Recommendation;
+
+                const cvesSection = document.getElementById('details-cves-section');
+                const cvesList = document.getElementById('details-cves-list');
+                cvesList.innerHTML = '';
+                if (vuln.CVEs && vuln.CVEs.length > 0) {
+                    vuln.CVEs.forEach(cve => {
+                        const listItem = document.createElement('li');
+                        listItem.innerHTML = `<a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=${cve.ID}" target="_blank" class="text-blue-400 hover:underline">${cve.ID}</a> (CVSS: ${cve.CVSS}) - ${cve.Summary}`;
+                        cvesList.appendChild(listItem);
+                    });
+                    cvesSection.style.display = 'block';
+                } else {
+                    cvesSection.style.display = 'none';
+                }
+            });
         }
 
         function saveProgress(checkbox) {

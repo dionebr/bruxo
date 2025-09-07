@@ -90,6 +90,7 @@ type Config struct {
 	ReportFormat      string
 	ReportType        string
 	AssetValue        string
+	EnableCVELookup   bool
 }
 
 type AttackStep struct {
@@ -163,6 +164,7 @@ type Vulnerability struct {
 	AttackFlow         AttackFlow `json:"AttackFlow"`
 	BusinessImpactScore int        `json:"BusinessImpactScore"`
 	EstimatedRepairTime string     `json:"EstimatedRepairTime,omitempty"`
+	CVEs               []CVEInfo  `json:"CVEs,omitempty"`
 	MITRETechniqueID   string     `json:"MITRETechniqueID,omitempty"`
 	MITRETechniqueName string     `json:"MITRETechniqueName,omitempty"`
 	MITRETechniqueURL  string     `json:"MITRETechniqueURL,omitempty"`
@@ -174,20 +176,32 @@ type Evidence struct {
 	SourceURL string `json:"SourceURL"`
 }
 
+type DiscoveredTechnology struct {
+	Name    string `json:"Name"`
+	Version string `json:"Version"`
+}
+
+type CVEInfo struct {
+	ID      string  `json:"ID"`
+	Summary string  `json:"Summary"`
+	CVSS    float64 `json:"CVSS"`
+}
+
 type ScanResult struct {
-	URL             string            `json:"URL"`
-	StatusCode      int               `json:"StatusCode"`
-	ContentLength   int               `json:"ContentLength"`
-	ResponseTime    time.Duration     `json:"ResponseTime"`
-	ContentType     string            `json:"ContentType"`
-	Headers         map[string]string `json:"Headers"`
-	Title           string            `json:"Title"`
-	Category        string            `json:"Category"`
-	IsHidden        bool              `json:"IsHidden"`
-	Error           string            `json:"Error"`
-	AIAnalysis      string            `json:"AIAnalysis,omitempty"`
-	Vulnerabilities []Vulnerability   `json:"Vulnerabilities,omitempty"`
-	Evidences       []Evidence        `json:"Evidences,omitempty"`
+	URL             string                 `json:"URL"`
+	StatusCode      int                    `json:"StatusCode"`
+	ContentLength   int                    `json:"ContentLength"`
+	ResponseTime    time.Duration          `json:"ResponseTime"`
+	ContentType     string                 `json:"ContentType"`
+	Headers         map[string]string      `json:"Headers"`
+	Title           string                 `json:"Title"`
+	Category        string                 `json:"Category"`
+	IsHidden        bool                   `json:"IsHidden"`
+	Error           string                 `json:"Error"`
+	AIAnalysis      string                 `json:"AIAnalysis,omitempty"`
+	Vulnerabilities []Vulnerability        `json:"Vulnerabilities,omitempty"`
+	Evidences       []Evidence             `json:"Evidences,omitempty"`
+	Technologies    []DiscoveredTechnology `json:"Technologies"`
 }
 
 type OpenAIRequest struct {
@@ -404,6 +418,10 @@ func (b *BruxoEngine) Scan() error {
 
 	b.calculateImpactScores()
 
+	if b.config.EnableCVELookup {
+		b.queryCVEs()
+	}
+
 	if b.config.EnableAttackFlow {
 		for i := range b.results {
 			result := &b.results[i]
@@ -495,6 +513,7 @@ func (b *BruxoEngine) scanURL(urlStr string) ScanResult {
 	if b.shouldShowResult(statusCode) || isHidden {
 		result.Title = extractTitle(body)
 		b.analyzeVulnerabilities(&result, body)
+		b.identifyTechnologies(resp, &result)
 		result.Evidences = b.collectEvidence(body, urlStr)
 	}
 
@@ -650,6 +669,78 @@ func (b *BruxoEngine) calculateImpactScores() {
 				vuln.EstimatedRepairTime = "N/A"
 			}
 		}
+	}
+}
+
+func (b *BruxoEngine) queryCVEs() {
+	b.logger.Info("Starting CVE lookup for discovered technologies...")
+
+	// 1. Coletar tecnologias únicas
+	uniqueTechs := make(map[string]DiscoveredTechnology)
+	for _, result := range b.results {
+		for _, tech := range result.Technologies {
+			key := strings.ToLower(tech.Name)
+			if _, exists := uniqueTechs[key]; !exists {
+				uniqueTechs[key] = tech
+			}
+		}
+	}
+
+	// 2. Consultar a API para cada tecnologia
+	for _, tech := range uniqueTechs {
+		url := fmt.Sprintf("https://cve.circl.lu/api/search/%s/%s", strings.ToLower(tech.Name), tech.Version)
+		resp, err := http.Get(url)
+		if err != nil {
+			b.logger.Error("Error querying CVE API for %s: %v", tech.Name, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		var cveResults []struct { // Struct anônima para a resposta da API
+			ID      string  `json:"id"`
+			Summary string  `json:"summary"`
+			CVSS    float64 `json:"cvss"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&cveResults); err != nil {
+			continue // Ignora se não conseguir decodificar
+		}
+
+		// 3. Anexar os resultados
+		if len(cveResults) > 0 && len(b.results) > 0 && len(b.results[0].Vulnerabilities) > 0 {
+			b.logger.Info("Found %d CVEs for %s %s", len(cveResults), tech.Name, tech.Version)
+			for _, cve := range cveResults {
+				cveInfo := CVEInfo{
+					ID:      cve.ID,
+					Summary: cve.Summary,
+					CVSS:    cve.CVSS,
+				}
+				// Simplificação: anexa à primeira vulnerabilidade do primeiro resultado
+				b.results[0].Vulnerabilities[0].CVEs = append(b.results[0].Vulnerabilities[0].CVEs, cveInfo)
+			}
+		}
+	}
+}
+
+func (b *BruxoEngine) identifyTechnologies(resp *fasthttp.Response, result *ScanResult) {
+	serverHeader := string(resp.Header.Peek("Server"))
+	if serverHeader != "" {
+		parts := strings.Split(serverHeader, "/")
+		tech := DiscoveredTechnology{Name: parts[0]}
+		if len(parts) > 1 {
+			tech.Version = parts[1]
+		}
+		result.Technologies = append(result.Technologies, tech)
+	}
+
+	xPoweredByHeader := string(resp.Header.Peek("X-Powered-By"))
+	if xPoweredByHeader != "" {
+		parts := strings.Split(xPoweredByHeader, "/")
+		tech := DiscoveredTechnology{Name: parts[0]}
+		if len(parts) > 1 {
+			tech.Version = parts[1]
+		}
+		result.Technologies = append(result.Technologies, tech)
 	}
 }
 
@@ -1240,6 +1331,7 @@ func main() {
 	flag.StringVar(&config.ReportFormat, "report-format", "html", "Output report format (html, pdf)")
 	flag.StringVar(&config.ReportType, "report-type", "technical", "Report type (technical, executive)")
 	flag.StringVar(&config.AssetValue, "asset-value", "medium", "Asset value for impact calculation (low, medium, high, critical)")
+	flag.BoolVar(&config.EnableCVELookup, "enable-cve-lookup", false, "Enable CVE lookup for discovered technologies")
 
 	flag.Parse()
 
