@@ -62,6 +62,7 @@ type BruxoEngine struct {
 	baseHash        uint32
 	chatAnalysis    string
 	attackScenarios []AttackScenario
+	phishingCampaign *PhishingCampaign
 
 	// C2 Fields
 	c2Agents map[string]*Agent
@@ -90,7 +91,8 @@ type Config struct {
 	ReportFormat      string
 	ReportType        string
 	AssetValue        string
-	EnableCVELookup   bool
+	EnableCVELookup         bool
+	GeneratePhishingCampaign string
 }
 
 type AttackStep struct {
@@ -185,6 +187,13 @@ type CVEInfo struct {
 	ID      string  `json:"ID"`
 	Summary string  `json:"Summary"`
 	CVSS    float64 `json:"CVSS"`
+}
+
+type PhishingCampaign struct {
+	TargetPersona string `json:"TargetPersona"`
+	Pretext       string `json:"Pretext"`
+	EmailSubject  string `json:"EmailSubject"`
+	EmailBody     string `json:"EmailBody"`
 }
 
 type ScanResult struct {
@@ -672,6 +681,70 @@ func (b *BruxoEngine) calculateImpactScores() {
 	}
 }
 
+func (b *BruxoEngine) generatePhishingCampaign() {
+	if b.config.GroqAPIKey == "" {
+		b.logger.Info("Groq API key not provided, skipping AI phishing campaign generation.")
+		return
+	}
+
+	b.logger.Info("Generating AI-powered phishing campaign for persona: %s", b.config.GeneratePhishingCampaign)
+
+	// 1. Coletar dados para a IA
+	vulnSummary, err := json.MarshalIndent(b.results, "", "  ")
+	if err != nil {
+		b.logger.Error("Error creating vulnerability summary for AI: %v", err)
+		return
+	}
+
+	// 2. Criar o prompt
+	prompt := fmt.Sprintf(`{
+		"role": "system",
+		"content": "You are a world-class social engineering expert. Based on the provided web scan results and the target persona, create a single, highly convincing phishing campaign. Your response must be a single JSON object with the keys 'TargetPersona', 'Pretext', 'EmailSubject', and 'EmailBody'. The email body should be in HTML format."
+	},
+	{
+		"role": "user",
+		"content": "Target Persona: %s. Scan results:\n%s"
+	}`,
+	b.config.GeneratePhishingCampaign, string(vulnSummary))
+
+	// 3. Chamar a API da Groq
+	client := &http.Client{Timeout: 120 * time.Second}
+	requestBody := fmt.Sprintf(`{"messages": [%s], "model": "llama3-70b-8192"}`, prompt)
+
+	req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewBuffer([]byte(requestBody)))
+	if err != nil {
+		b.logger.Error("Error creating AI request: %v", err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+b.config.GroqAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		b.logger.Error("Error calling Groq API: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 4. Processar a resposta
+	var openAIResp OpenAIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&openAIResp); err != nil {
+		b.logger.Error("Error decoding AI response: %v", err)
+		return
+	}
+
+	if len(openAIResp.Choices) > 0 {
+		content := openAIResp.Choices[0].Message.Content
+		var campaign PhishingCampaign
+		if err := json.Unmarshal([]byte(content), &campaign); err != nil {
+			b.logger.Error("Error unmarshalling AI-generated phishing campaign: %v", err)
+		} else {
+			b.phishingCampaign = &campaign
+			b.logger.Info("Successfully generated AI phishing campaign.")
+		}
+	}
+}
+
 func (b *BruxoEngine) queryCVEs() {
 	b.logger.Info("Starting CVE lookup for discovered technologies...")
 
@@ -768,6 +841,7 @@ func (b *BruxoEngine) renderHTMLReport(outputPath, templateName string) error {
 
 	funcMap := template.FuncMap{
 		"ToLower": strings.ToLower,
+		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
 	}
 
 	tmpl, err := template.New(templateName).Funcs(funcMap).ParseFiles(templateName)
@@ -869,6 +943,7 @@ func (b *BruxoEngine) prepareTemplateData() map[string]interface{} {
 		"MediumCount":     mediumCount,
 		"LowCount":        lowCount,
 		"ScanDate":        time.Now().Format("January 2, 2006"),
+		"PhishingCampaign": b.phishingCampaign,
 	}
 }
 
@@ -1332,6 +1407,7 @@ func main() {
 	flag.StringVar(&config.ReportType, "report-type", "technical", "Report type (technical, executive)")
 	flag.StringVar(&config.AssetValue, "asset-value", "medium", "Asset value for impact calculation (low, medium, high, critical)")
 	flag.BoolVar(&config.EnableCVELookup, "enable-cve-lookup", false, "Enable CVE lookup for discovered technologies")
+	flag.StringVar(&config.GeneratePhishingCampaign, "gen-phishing-campaign", "", "Generate an AI-powered phishing campaign for a target persona (e.g., 'IT Administrator')")
 
 	flag.Parse()
 
