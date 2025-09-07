@@ -263,7 +263,7 @@ func handleInternalScan(cidr string) string {
 			defer func() { <-sem }()
 
 			for _, port := range ports {
-				address := fmt.Sprintf("%s:%d", ip, port)
+				address := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
 				conn, err := net.DialTimeout("tcp", address, 1*time.Second)
 				if err == nil {
 					conn.Close()
