@@ -252,10 +252,20 @@ func (b *BruxoEngine) Scan() error {
 	}
 
 	b.wg.Add(1)
-	go b.collectResults()
-
+	// Inicia a barra de progresso em uma goroutine separada
 	b.wg.Add(1)
 	go b.printProgressPeriodically()
+
+	// Adiciona uma verificação inicial na própria URL base
+	b.logger.Info("Performing initial check on the base target URL...")
+	initialResult := b.scanURL(b.config.TargetURL)
+	if initialResult.Error == "" && (b.shouldShowResult(initialResult.StatusCode) || initialResult.IsHidden) {
+		atomic.AddInt64(&b.progress.found, 1)
+		b.mu.Lock()
+		b.analyzeVulnerabilities(&initialResult)
+		b.results = append(b.results, initialResult)
+		b.mu.Unlock()
+	}
 
 	go func() {
 		defer close(b.workQueue)

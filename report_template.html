@@ -149,8 +149,13 @@ sekurlsa::logonpasswords</code></pre>
         const detailsContent = document.getElementById('details-content');
 
         // 1. Process and sort data
-        const processedResults = results.map(r => ({...r, highestSeverity: getHighestSeverity(r.Vulnerabilities)}));
-        processedResults.sort((a, b) => severityOrder[a.highestSeverity] - severityOrder[b.highestSeverity]);
+        const processedResults = results.map(function(r) {
+            r.highestSeverity = getHighestSeverity(r.Vulnerabilities);
+            return r;
+        });
+        processedResults.sort(function(a, b) {
+            return severityOrder[a.highestSeverity] - severityOrder[b.highestSeverity];
+        });
 
         // 2. Populate Panels
         processedResults.forEach(result => {
@@ -195,9 +200,13 @@ sekurlsa::logonpasswords</code></pre>
         }
 
         // 4. Post-Exploitation Panel Logic
-        const hasHighOrCriticalVuln = processedResults.some(r => 
-            r.highestSeverity === 'Critical' || r.highestSeverity === 'High'
-        );
+        let hasHighOrCriticalVuln = false;
+        for (let i = 0; i < processedResults.length; i++) {
+            if (processedResults[i].highestSeverity === 'Critical' || processedResults[i].highestSeverity === 'High') {
+                hasHighOrCriticalVuln = true;
+                break;
+            }
+        }
 
         if (hasHighOrCriticalVuln) {
             const postExploitationPanel = document.getElementById('post-exploitation-panel');
