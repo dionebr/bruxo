@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"github.com/chromedp/cdproto/page"
 	"flag"
 	"fmt"
 	"html/template"
@@ -24,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/time/rate"
 )
@@ -84,6 +86,8 @@ type Config struct {
 	GroqAPIKey        string
 	EnableAttackFlow  bool
 	RedTeamToolURL    string
+	ReportFormat      string
+	ReportType        string
 }
 
 type AttackStep struct {
@@ -602,55 +606,115 @@ func (b *BruxoEngine) printSummaryTable() {
 }
 
 func (b *BruxoEngine) generateReport() error {
-	switch b.config.Format {
-	case "json":
-		data, err := json.MarshalIndent(b.results, "", "  ")
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(b.config.OutputFile, data, 0644)
+	switch b.config.ReportFormat {
 	case "html":
 		return b.generateHTMLReport()
+	case "pdf":
+		return b.generatePDFReport()
+	default:
+		return fmt.Errorf("unsupported report format: %s", b.config.ReportFormat)
 	}
-	return fmt.Errorf("unsupported or unspecified format: %s", b.config.Format)
 }
 
 func (b *BruxoEngine) generateHTMLReport() error {
-	funcMap := template.FuncMap{
-		"json": func(v interface{}) (string, error) {
-			b, err := json.Marshal(v)
-			return string(b), err
-		},
-	}
+	return b.renderHTMLReport(b.config.OutputFile, "report_template.html")
+}
 
-	tmpl, err := template.New("report_template.html").Funcs(funcMap).ParseFiles("report_template.html")
-	if err != nil {
-		return fmt.Errorf("could not load HTML template: %w", err)
-	}
-
-	file, err := os.Create(b.config.OutputFile)
+func (b *BruxoEngine) renderHTMLReport(outputPath, templateName string) error {
+	file, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	data := struct {
-		Results      []ScanResult
-		TargetURL    string
-		GeneratedAt  string
-		TotalFound   int
-		ChatAnalysis string
-		AttackScenarios []AttackScenario
-	}{
-		Results:      b.results,
-		TargetURL:    b.config.TargetURL,
-		GeneratedAt:  time.Now().Format(time.RFC1123),
-		TotalFound:   len(b.results),
-		ChatAnalysis: b.chatAnalysis,
-		AttackScenarios: b.attackScenarios,
+	tmpl, err := template.ParseFiles(templateName)
+	if err != nil {
+		return err
 	}
 
+	data := b.prepareTemplateData()
+
 	return tmpl.Execute(file, data)
+}
+
+func (b *BruxoEngine) generatePDFReport() error {
+	// 1. Escolher o template correto
+	templateName := "report_template.html"
+	if b.config.ReportType == "executive" {
+		templateName = "executive_template.html"
+	}
+
+	// 2. Gerar o HTML em um arquivo temporário
+	tempHTML, err := os.CreateTemp("", "bruxo-report-*.html")
+	if err != nil {
+		return fmt.Errorf("could not create temp file: %w", err)
+	}
+	defer os.Remove(tempHTML.Name())
+
+	// Reutiliza a lógica de geração de HTML, mas para o arquivo temporário
+	if err := b.renderHTMLReport(tempHTML.Name(), templateName); err != nil {
+		return fmt.Errorf("could not render temporary HTML: %w", err)
+	}
+
+	// 3. Converter para PDF com chromedp
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
+
+	var buf []byte
+	url := "file://" + tempHTML.Name()
+
+	task := chromedp.Tasks{
+		chromedp.Navigate(url),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			buf, _, err = page.PrintToPDF().Do(ctx)
+			return err
+		}),
+	}
+
+	if err := chromedp.Run(ctx, task); err != nil {
+		return fmt.Errorf("could not print to PDF: %w", err)
+	}
+
+	// 4. Salvar o PDF final
+	if err := os.WriteFile(b.config.OutputFile, buf, 0644); err != nil {
+		return fmt.Errorf("could not write PDF file: %w", err)
+	}
+
+	b.logger.Info("Successfully generated PDF report: %s", b.config.OutputFile)
+	return nil
+}
+
+func (b *BruxoEngine) prepareTemplateData() map[string]interface{} {
+	criticalCount, highCount, mediumCount, lowCount := 0, 0, 0, 0
+	for _, result := range b.results {
+		for _, vuln := range result.Vulnerabilities {
+			switch vuln.Severity {
+			case "Critical":
+				criticalCount++
+			case "High":
+				highCount++
+			case "Medium":
+				mediumCount++
+			case "Low":
+				lowCount++
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"Results":          b.results,
+		"TargetURL":        b.config.TargetURL,
+		"GeneratedAt":      time.Now().Format(time.RFC1123),
+		"TotalFound":       len(b.results),
+		"ChatAnalysis":     b.chatAnalysis,
+		"AttackScenarios":  b.attackScenarios,
+		"CriticalCount":    criticalCount,
+		"HighCount":        highCount,
+		"MediumCount":      mediumCount,
+		"LowCount":         lowCount,
+		"ScanDate":         time.Now().Format("January 2, 2006"),
+	}
 }
 
 func (b *BruxoEngine) categorizePath(path string) string {
@@ -1109,6 +1173,8 @@ func main() {
 	flag.StringVar(&config.GroqAPIKey, "groq-api-key", os.Getenv("GROQ_API_KEY"), "Groq API Key for AI analysis")
 	flag.BoolVar(&config.EnableAttackFlow, "attack-flow", false, "Enable guided attack flows for found vulnerabilities")
 	flag.StringVar(&config.RedTeamToolURL, "red-team-tool-url", "", "URL of the Red Team tool API for integration")
+	flag.StringVar(&config.ReportFormat, "report-format", "html", "Output report format (html, pdf)")
+	flag.StringVar(&config.ReportType, "report-type", "technical", "Report type (technical, executive)")
 
 	flag.Parse()
 
